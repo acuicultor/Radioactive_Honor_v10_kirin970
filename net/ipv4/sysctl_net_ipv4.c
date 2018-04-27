@@ -110,10 +110,11 @@ static void set_ping_group_range(struct ctl_table *table, kgid_t low, kgid_t hig
 	kgid_t *data = table->data;
 	struct net *net =
 		container_of(table->data, struct net, ipv4.ping_group_range.range);
-	write_seqlock(&net->ipv4.ping_group_range.lock);
+	write_seqlock_bh(&net->ipv4.ping_group_range.lock);
+
 	data[0] = low;
 	data[1] = high;
-	write_sequnlock(&net->ipv4.ping_group_range.lock);
+	write_sequnlock_bh(&net->ipv4.ping_group_range.lock);
 }
 
 /* Validate changes from /proc interface. */
@@ -782,6 +783,17 @@ static struct ctl_table ipv4_table[] = {
 		.mode           = 0644,
 		.proc_handler   = proc_tcp_default_init_rwnd
 	},
+#ifdef CONFIG_TCP_AUTOTUNING
+	{
+		.procname	= "tcp_autotuning",
+		.data		= &sysctl_tcp_autotuning,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+#endif
 	{
 		.procname	= "icmp_msgs_per_sec",
 		.data		= &sysctl_icmp_msgs_per_sec,
@@ -821,6 +833,15 @@ static struct ctl_table ipv4_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &one
 	},
+#ifdef CONFIG_TCP_ARGO
+	{
+		.procname	= "tcp_argo",
+		.data		= &sysctl_tcp_argo,
+		.maxlen		= sizeof(sysctl_tcp_argo),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif /* CONFIG_TCP_ARGO */
 	{ }
 };
 
@@ -901,6 +922,20 @@ static struct ctl_table ipv4_net_table[] = {
 		.maxlen		= 65536,
 		.mode		= 0644,
 		.proc_handler	= proc_do_large_bitmap,
+	},
+	{
+		.procname	= "local_reserved_ports_bind_ctrl",
+		.data		= &sysctl_local_reserved_ports_bind_ctrl,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "local_reserved_ports_bind_pid",
+		.data		= &sysctl_local_reserved_ports_bind_pid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
 	},
 	{
 		.procname	= "ip_no_pmtu_disc",

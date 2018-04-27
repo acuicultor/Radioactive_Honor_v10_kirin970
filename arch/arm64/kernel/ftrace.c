@@ -16,8 +16,33 @@
 #include <asm/cacheflush.h>
 #include <asm/ftrace.h>
 #include <asm/insn.h>
+#include <asm/sections.h>
 
 #ifdef CONFIG_DYNAMIC_FTRACE
+#ifdef CONFIG_DEBUG_RODATA
+#include "../mm/mm.h"
+#endif
+
+int ftrace_arch_code_modify_prepare(void)
+{
+#ifdef CONFIG_DEBUG_RODATA
+	create_mapping_late(__pa(_stext), (unsigned long)_stext,
+				__pa(_etext) - __pa(_stext),
+				PAGE_KERNEL_EXEC);
+#endif
+	return 0;
+}
+
+int ftrace_arch_code_modify_post_process(void)
+{
+#ifdef CONFIG_DEBUG_RODATA
+	create_mapping_late(__pa(_stext), (unsigned long)_stext,
+				__pa(_etext) - __pa(_stext),
+				PAGE_KERNEL_EXEC  | PTE_RDONLY);
+#endif
+	return 0;
+}
+
 /*
  * Replace a single instruction, which may be a branch or NOP.
  * If @validate == true, a replaced instruction is checked against 'old'.
@@ -112,6 +137,7 @@ int __init ftrace_dyn_arch_init(void)
  *
  * Note that @frame_pointer is used only for sanity check later.
  */
+/*lint -save -e578*/
 void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
 			   unsigned long frame_pointer)
 {
@@ -120,7 +146,7 @@ void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
 	struct ftrace_graph_ent trace;
 	int err;
 
-	if (unlikely(atomic_read(&current->tracing_graph_pause)))
+	if (unlikely(atomic_read(&current->tracing_graph_pause))) /*lint !e666*/
 		return;
 
 	/*
@@ -144,6 +170,7 @@ void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
 	else
 		*parent = return_hooker;
 }
+/*lint -restore*/
 
 #ifdef CONFIG_DYNAMIC_FTRACE
 /*

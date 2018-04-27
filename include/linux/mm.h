@@ -665,6 +665,9 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 #define NODES_PGOFF		(SECTIONS_PGOFF - NODES_WIDTH)
 #define ZONES_PGOFF		(NODES_PGOFF - ZONES_WIDTH)
 #define LAST_CPUPID_PGOFF	(ZONES_PGOFF - LAST_CPUPID_WIDTH)
+#ifdef CONFIG_TASK_PROTECT_LRU
+#define PROTECT_LRU_PGOFF	(LAST_CPUPID_PGOFF - PROTECT_LRU_WIDTH)
+#endif
 
 /*
  * Define the bit shifts to access each section.  For non-existent
@@ -675,6 +678,9 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 #define NODES_PGSHIFT		(NODES_PGOFF * (NODES_WIDTH != 0))
 #define ZONES_PGSHIFT		(ZONES_PGOFF * (ZONES_WIDTH != 0))
 #define LAST_CPUPID_PGSHIFT	(LAST_CPUPID_PGOFF * (LAST_CPUPID_WIDTH != 0))
+#ifdef CONFIG_TASK_PROTECT_LRU
+#define PROTECT_LRU_PGSHIFT	(PROTECT_LRU_PGOFF * (PROTECT_LRU_WIDTH != 0))
+#endif
 
 /* NODE:ZONE or SECTION:ZONE is used to ID a zone for the buddy allocator */
 #ifdef NODE_NOT_IN_PAGE_FLAGS
@@ -698,6 +704,9 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 #define SECTIONS_MASK		((1UL << SECTIONS_WIDTH) - 1)
 #define LAST_CPUPID_MASK	((1UL << LAST_CPUPID_SHIFT) - 1)
 #define ZONEID_MASK		((1UL << ZONEID_SHIFT) - 1)
+#ifdef CONFIG_TASK_PROTECT_LRU
+#define PROTECT_LRU_MASK	((1UL << PROTECT_LRU_WIDTH) - 1)
+#endif
 
 static inline enum zone_type page_zonenum(const struct page *page)
 {
@@ -910,6 +919,28 @@ static inline struct mem_cgroup *page_memcg(struct page *page)
 
 static inline void set_page_memcg(struct page *page, struct mem_cgroup *memcg)
 {
+}
+#endif
+
+#ifdef CONFIG_TASK_PROTECT_LRU
+static inline int get_page_num(const struct page *page)
+{
+	return (page->flags >> PROTECT_LRU_PGSHIFT) & PROTECT_LRU_MASK;
+}
+
+static inline void set_page_num(struct page *page, int num)
+{
+	unsigned long old_flags, flags;
+
+	do {
+		/*
+		 * old_flags maybe use the same register of page->flags
+		 * by gcc, so cmpxchg maybe not help.
+		 */
+		old_flags = flags = ACCESS_ONCE(page->flags);
+		flags &= ~(PROTECT_LRU_MASK << PROTECT_LRU_PGSHIFT);
+		flags |= (num & PROTECT_LRU_MASK) << PROTECT_LRU_PGSHIFT;
+	} while (cmpxchg(&page->flags, old_flags, flags) != old_flags);
 }
 #endif
 
@@ -1145,6 +1176,11 @@ struct mm_walk {
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	void *private;
+#ifdef CONFIG_HISI_SWAP_ZDATA
+	bool hiber;
+	unsigned nr_reclaimed;
+	unsigned nr_writedblock;
+#endif
 };
 
 int walk_page_range(unsigned long addr, unsigned long end,
@@ -1683,6 +1719,12 @@ extern void free_highmem_page(struct page *page);
 extern void adjust_managed_page_count(struct page *page, long count);
 extern void mem_init_print_info(const char *str);
 
+#ifdef CONFIG_HISI_RESORT_ZONE_FREELIST
+extern void resort_zone_freelist(void);
+#else
+static inline void resort_zone_freelist(void) {}
+#endif
+
 extern void reserve_bootmem_region(phys_addr_t start, phys_addr_t end);
 
 /* Free the reserved page into the buddy system, so it gets managed. */
@@ -2161,14 +2203,18 @@ kernel_map_pages(struct page *page, int numpages, int enable)
 }
 #ifdef CONFIG_HIBERNATION
 extern bool kernel_page_present(struct page *page);
-#endif /* CONFIG_HIBERNATION */
-#else
+#endif	/* CONFIG_HIBERNATION */
+#else	/* CONFIG_DEBUG_PAGEALLOC */
 static inline void
 kernel_map_pages(struct page *page, int numpages, int enable) {}
 #ifdef CONFIG_HIBERNATION
 static inline bool kernel_page_present(struct page *page) { return true; }
-#endif /* CONFIG_HIBERNATION */
-#endif
+#endif	/* CONFIG_HIBERNATION */
+static inline bool debug_pagealloc_enabled(void)
+{
+	return false;
+}
+#endif	/* CONFIG_DEBUG_PAGEALLOC */
 
 #ifdef __HAVE_ARCH_GATE_AREA
 extern struct vm_area_struct *get_gate_vma(struct mm_struct *mm);

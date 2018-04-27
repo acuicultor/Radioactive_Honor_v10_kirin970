@@ -45,24 +45,13 @@ static void update_general_status(struct f2fs_sb_info *sbi)
 	si->ndirty_dent = get_pages(sbi, F2FS_DIRTY_DENTS);
 	si->ndirty_meta = get_pages(sbi, F2FS_DIRTY_META);
 	si->ndirty_data = get_pages(sbi, F2FS_DIRTY_DATA);
-	si->ndirty_qdata = get_pages(sbi, F2FS_DIRTY_QDATA);
 	si->ndirty_imeta = get_pages(sbi, F2FS_DIRTY_IMETA);
 	si->ndirty_dirs = sbi->ndirty_inode[DIR_INODE];
 	si->ndirty_files = sbi->ndirty_inode[FILE_INODE];
-
-	si->nquota_files = 0;
-	if (f2fs_sb_has_quota_ino(sbi->sb)) {
-		for (i = 0; i < MAXQUOTAS; i++) {
-			if (f2fs_qf_ino(sbi->sb, i))
-				si->nquota_files++;
-		}
-	}
 	si->ndirty_all = sbi->ndirty_inode[DIRTY_META];
 	si->inmem_pages = get_pages(sbi, F2FS_INMEM_PAGES);
 	si->aw_cnt = atomic_read(&sbi->aw_cnt);
-	si->vw_cnt = atomic_read(&sbi->vw_cnt);
 	si->max_aw_cnt = atomic_read(&sbi->max_aw_cnt);
-	si->max_vw_cnt = atomic_read(&sbi->max_vw_cnt);
 	si->nr_wb_cp_data = get_pages(sbi, F2FS_WB_CP_DATA);
 	si->nr_wb_data = get_pages(sbi, F2FS_WB_DATA);
 	if (SM_I(sbi) && SM_I(sbi)->fcc_info) {
@@ -70,8 +59,6 @@ static void update_general_status(struct f2fs_sb_info *sbi)
 			atomic_read(&SM_I(sbi)->fcc_info->issued_flush);
 		si->nr_flushing =
 			atomic_read(&SM_I(sbi)->fcc_info->issing_flush);
-		si->flush_list_empty =
-			llist_empty(&SM_I(sbi)->fcc_info->issue_list);
 	}
 	if (SM_I(sbi) && SM_I(sbi)->dcc_info) {
 		si->nr_discarded =
@@ -107,9 +94,8 @@ static void update_general_status(struct f2fs_sb_info *sbi)
 	si->dirty_nats = NM_I(sbi)->dirty_nat_cnt;
 	si->sits = MAIN_SEGS(sbi);
 	si->dirty_sits = SIT_I(sbi)->dirty_sentries;
-	si->free_nids = NM_I(sbi)->nid_cnt[FREE_NID];
-	si->avail_nids = NM_I(sbi)->available_nids;
-	si->alloc_nids = NM_I(sbi)->nid_cnt[PREALLOC_NID];
+	si->free_nids = NM_I(sbi)->nid_cnt[FREE_NID_LIST];
+	si->alloc_nids = NM_I(sbi)->nid_cnt[ALLOC_NID_LIST];
 	si->bg_gc = sbi->bg_gc;
 	si->util_free = (int)(free_user_blocks(sbi) >> sbi->log_blocks_per_seg)
 		* 100 / (int)(sbi->user_block_count >> sbi->log_blocks_per_seg)
@@ -122,8 +108,8 @@ static void update_general_status(struct f2fs_sb_info *sbi)
 	for (i = CURSEG_HOT_DATA; i <= CURSEG_COLD_NODE; i++) {
 		struct curseg_info *curseg = CURSEG_I(sbi, i);
 		si->curseg[i] = curseg->segno;
-		si->cursec[i] = GET_SEC_FROM_SEG(sbi, curseg->segno);
-		si->curzone[i] = GET_ZONE_FROM_SEC(sbi, si->cursec[i]);
+		si->cursec[i] = curseg->segno / sbi->segs_per_sec;
+		si->curzone[i] = si->cursec[i] / sbi->secs_per_zone;
 	}
 
 	for (i = 0; i < 2; i++) {
@@ -147,10 +133,10 @@ static void update_sit_info(struct f2fs_sb_info *sbi)
 
 	bimodal = 0;
 	total_vblocks = 0;
-	blks_per_sec = BLKS_PER_SEC(sbi);
+	blks_per_sec = sbi->segs_per_sec * sbi->blocks_per_seg;
 	hblks_per_sec = blks_per_sec / 2;
 	for (segno = 0; segno < MAIN_SEGS(sbi); segno += sbi->segs_per_sec) {
-		vblocks = get_valid_blocks(sbi, segno, true);
+		vblocks = get_valid_blocks(sbi, segno, sbi->segs_per_sec);
 		dist = abs(vblocks - hblks_per_sec);
 		bimodal += dist * dist;
 
@@ -179,11 +165,7 @@ static void update_mem_info(struct f2fs_sb_info *sbi)
 	if (si->base_mem)
 		goto get_cache;
 
-	/* build stat */
-	si->base_mem = sizeof(struct f2fs_stat_info);
-
-	/* build superblock */
-	si->base_mem += sizeof(struct f2fs_sb_info) + sbi->sb->s_blocksize;
+	si->base_mem = sizeof(struct f2fs_sb_info) + sbi->sb->s_blocksize;
 	si->base_mem += 2 * sizeof(struct f2fs_inode_info);
 	si->base_mem += sizeof(*sbi->ckpt);
 	si->base_mem += sizeof(struct percpu_counter) * NR_COUNT_TYPE;
@@ -223,14 +205,13 @@ static void update_mem_info(struct f2fs_sb_info *sbi)
 	si->base_mem += (NM_I(sbi)->nat_bits_blocks << F2FS_BLKSIZE_BITS);
 	si->base_mem += NM_I(sbi)->nat_blocks * NAT_ENTRY_BITMAP_SIZE;
 	si->base_mem += NM_I(sbi)->nat_blocks / 8;
-	si->base_mem += NM_I(sbi)->nat_blocks * sizeof(unsigned short);
 
 get_cache:
 	si->cache_mem = 0;
 
 	/* build gc */
-	if (sbi->gc_thread)
-		si->cache_mem += sizeof(struct f2fs_gc_kthread);
+	/*if (sbi->gc_thread)
+		si->cache_mem += sizeof(struct f2fs_gc_kthread);*/
 
 	/* build merge flush thread */
 	if (SM_I(sbi)->fcc_info)
@@ -242,14 +223,14 @@ get_cache:
 	}
 
 	/* free nids */
-	si->cache_mem += (NM_I(sbi)->nid_cnt[FREE_NID] +
-				NM_I(sbi)->nid_cnt[PREALLOC_NID]) *
+	si->cache_mem += (NM_I(sbi)->nid_cnt[FREE_NID_LIST] +
+				NM_I(sbi)->nid_cnt[ALLOC_NID_LIST]) *
 				sizeof(struct free_nid);
 	si->cache_mem += NM_I(sbi)->nat_cnt * sizeof(struct nat_entry);
 	si->cache_mem += NM_I(sbi)->dirty_nat_cnt *
 					sizeof(struct nat_entry_set);
 	si->cache_mem += si->inmem_pages * sizeof(struct inmem_pages);
-	for (i = 0; i < MAX_INO_ENTRY; i++)
+	for (i = 0; i <= ORPHAN_INO; i++)
 		si->cache_mem += sbi->im[i].ino_num * sizeof(struct ino_entry);
 	si->cache_mem += atomic_read(&sbi->total_ext_tree) *
 						sizeof(struct extent_tree);
@@ -266,6 +247,9 @@ get_cache:
 static int stat_show(struct seq_file *s, void *v)
 {
 	struct f2fs_stat_info *si;
+#ifdef CONFIG_F2FS_REMAP_GC
+	unsigned long long total_latency;
+#endif
 	int i = 0;
 	int j;
 
@@ -273,10 +257,9 @@ static int stat_show(struct seq_file *s, void *v)
 	list_for_each_entry(si, &f2fs_stat_list, stat_list) {
 		update_general_status(si->sbi);
 
-		seq_printf(s, "\n=====[ partition info(%pg). #%d, %s, CP: %s]=====\n",
+		seq_printf(s, "\n=====[ partition info(%pg). #%d, %s]=====\n",
 			si->sbi->sb->s_bdev, i++,
-			f2fs_readonly(si->sbi->sb) ? "RO": "RW",
-			f2fs_cp_error(si->sbi) ? "Error": "Good");
+			f2fs_readonly(si->sbi->sb) ? "RO": "RW");
 		seq_printf(s, "[SB: 1] [CP: 2] [SIT: %d] [NAT: %d] ",
 			   si->sit_area_segs, si->nat_area_segs);
 		seq_printf(s, "[SSA: %d] [MAIN: %d",
@@ -361,33 +344,37 @@ static int stat_show(struct seq_file *s, void *v)
 		seq_printf(s, "  - Inner Struct Count: tree: %d(%d), node: %d\n",
 				si->ext_tree, si->zombie_tree, si->ext_node);
 		seq_puts(s, "\nBalancing F2FS Async:\n");
-		seq_printf(s, "  - IO (CP: %4d, Data: %4d, Flush: (%4d %4d %4d), "
-			"Discard: (%4d %4d)) cmd: %4d undiscard:%4u\n",
+		seq_printf(s, "  - IO (CP: %4d, Data: %4d, Flush: (%4d %4d), "
+			   "Discard: (%4d %4d)) cmd: %4d undiscard:%4u\n",
 			   si->nr_wb_cp_data, si->nr_wb_data,
 			   si->nr_flushing, si->nr_flushed,
-			   si->flush_list_empty,
 			   si->nr_discarding, si->nr_discarded,
 			   si->nr_discard_cmd, si->undiscard_blks);
-		seq_printf(s, "  - inmem: %4d, atomic IO: %4d (Max. %4d), "
-			"volatile IO: %4d (Max. %4d)\n",
-			   si->inmem_pages, si->aw_cnt, si->max_aw_cnt,
-			   si->vw_cnt, si->max_vw_cnt);
+#ifdef CONFIG_F2FS_CLOSE_FUA
+		if (blk_flush_async_support(si->sbi->sb->s_bdev)) /* indicate fua is off or on */
+			seq_printf(s, "  - inmem: %4d, atomic io: %4d (Max. %4d)\n",
+				   si->inmem_pages, si->aw_cnt, si->max_aw_cnt);
+		else
+			seq_printf(s, "  - inmem: %4d, Atomic IO: %4d (Max. %4d)\n",
+				   si->inmem_pages, si->aw_cnt, si->max_aw_cnt);
+#else
+		seq_printf(s, "  - inmem: %4d, atomic IO: %4d (Max. %4d)\n",
+			   si->inmem_pages, si->aw_cnt, si->max_aw_cnt);
+#endif
 		seq_printf(s, "  - nodes: %4d in %4d\n",
 			   si->ndirty_node, si->node_pages);
 		seq_printf(s, "  - dents: %4d in dirs:%4d (%4d)\n",
 			   si->ndirty_dent, si->ndirty_dirs, si->ndirty_all);
 		seq_printf(s, "  - datas: %4d in files:%4d\n",
 			   si->ndirty_data, si->ndirty_files);
-		seq_printf(s, "  - quota datas: %4d in quota files:%4d\n",
-			   si->ndirty_qdata, si->nquota_files);
 		seq_printf(s, "  - meta: %4d in %4d\n",
 			   si->ndirty_meta, si->meta_pages);
 		seq_printf(s, "  - imeta: %4d\n",
 			   si->ndirty_imeta);
 		seq_printf(s, "  - NATs: %9d/%9d\n  - SITs: %9d/%9d\n",
 			   si->dirty_nats, si->nats, si->dirty_sits, si->sits);
-		seq_printf(s, "  - free_nids: %9d/%9d\n  - alloc_nids: %9d\n",
-			   si->free_nids, si->avail_nids, si->alloc_nids);
+		seq_printf(s, "  - free_nids: %9d, alloc_nids: %9d\n",
+			   si->free_nids, si->alloc_nids);
 		seq_puts(s, "\nDistribution of User Blocks:");
 		seq_puts(s, " [ valid | invalid | free ]\n");
 		seq_puts(s, "  [");
@@ -424,6 +411,30 @@ static int stat_show(struct seq_file *s, void *v)
 				si->cache_mem >> 10);
 		seq_printf(s, "  - paged : %llu KB\n",
 				si->page_mem >> 10);
+
+#ifdef CONFIG_F2FS_REMAP_GC
+		/* Remap GC info */
+		seq_printf(s, "Remap info:\n");
+		seq_printf(s, "\tCP calls: %u\n", si->rmpgc_cp_count);
+		seq_printf(s, "\tGrouped count of buffered GC blocks (Group n for [2^n, 2^(n+1)-1]):\n");
+		for (j = 0; j < F2FS_RMPGC_STATS_NGROUPS; j++)
+			seq_printf(s, "\t\tGroup %d: %llu\n", j,
+				   si->rmpgc_block_stats[j]);
+
+		seq_printf(s, "\tMin Latency(ns): %lld\n", si->rmpgc_min_lat);
+		seq_printf(s, "\tMax Latency(ns): %lld\n", si->rmpgc_max_lat);
+
+		total_latency = (unsigned long long )si->rmpgc_total_lat;
+		do_div(total_latency, (si->rmpgc_nlats ? : 1));
+		seq_printf(s, "\tAvg Latency(ns): %llu\n", total_latency);
+
+		seq_printf(s, "\tGrouped count of wait time in nsec (Group n for [10^n, 10^(n+1)-1]):\n");
+		for (j = 0; j < F2FS_RMPGC_STATS_NGROUPS; j++)
+			seq_printf(s, "\t\tGroup %d: %llu\n", j,
+				   si->rmpgc_time_stats[j]);
+
+		seq_printf(s, "\tDIO calls: %d\n", atomic_read(&si->dio_count));
+#endif
 	}
 	mutex_unlock(&f2fs_stat_mutex);
 	return 0;
@@ -457,8 +468,16 @@ int f2fs_build_stats(struct f2fs_sb_info *sbi)
 	si->ssa_area_segs = le32_to_cpu(raw_super->segment_count_ssa);
 	si->main_area_segs = le32_to_cpu(raw_super->segment_count_main);
 	si->main_area_sections = le32_to_cpu(raw_super->section_count);
+	/*lint -save -e573*/
 	si->main_area_zones = si->main_area_sections /
 				le32_to_cpu(raw_super->secs_per_zone);
+	/*lint -restore*/
+
+#ifdef CONFIG_F2FS_REMAP_GC
+	si->rmpgc_min_lat = LLONG_MAX;
+	atomic_set(&si->dio_count, 0);
+#endif
+
 	si->sbi = sbi;
 	sbi->stat_info = si;
 
@@ -467,15 +486,15 @@ int f2fs_build_stats(struct f2fs_sb_info *sbi)
 	atomic64_set(&sbi->read_hit_largest, 0);
 	atomic64_set(&sbi->read_hit_cached, 0);
 
+	/*lint -save -e1058*/
 	atomic_set(&sbi->inline_xattr, 0);
 	atomic_set(&sbi->inline_inode, 0);
 	atomic_set(&sbi->inline_dir, 0);
 	atomic_set(&sbi->inplace_count, 0);
 
 	atomic_set(&sbi->aw_cnt, 0);
-	atomic_set(&sbi->vw_cnt, 0);
 	atomic_set(&sbi->max_aw_cnt, 0);
-	atomic_set(&sbi->max_vw_cnt, 0);
+	/*lint -restore*/
 
 	mutex_lock(&f2fs_stat_mutex);
 	list_add_tail(&si->stat_list, &f2fs_stat_list);

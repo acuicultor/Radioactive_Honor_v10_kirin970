@@ -527,7 +527,7 @@ FTR_SECTION_ELSE
 	clrrdi	r6,r8,40	/* get its 1T ESID */
 	clrrdi	r9,r1,40	/* get current sp 1T ESID */
 ALT_MMU_FTR_SECTION_END_IFCLR(MMU_FTR_1T_SEGMENT)
-	clrldi.	r0,r6,2		/* is new ESID c00000000? */
+	clrldi.	r0,r6,2
 	cmpd	cr1,r6,r9	/* or is new ESID the same as current ESID? */
 	cror	eq,4*cr1+eq,eq
 	beq	2f		/* if yes, don't slbie it */
@@ -716,7 +716,7 @@ resume_kernel:
 
 	addi	r8,r1,INT_FRAME_SIZE	/* Get the kprobed function entry */
 
-	ld	r3,GPR1(r1)
+	lwz	r3,GPR1(r1)
 	subi	r3,r3,INT_FRAME_SIZE	/* dst: Allocate a trampoline exception frame */
 	mr	r4,r1			/* src:  current exception frame */
 	mr	r1,r3			/* Reroute the trampoline frame to r1 */
@@ -730,8 +730,8 @@ resume_kernel:
 	addi	r6,r6,8
 	bdnz	2b
 
-	/* Do real store operation to complete stdu */
-	ld	r5,GPR1(r1)
+	/* Do real store operation to complete stwu */
+	lwz	r5,GPR1(r1)
 	std	r8,0(r5)
 
 	/* Clear _TIF_EMULATE_STACK_STORE flag */

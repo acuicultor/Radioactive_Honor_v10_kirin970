@@ -9,19 +9,13 @@
  * published by the Free Software Foundation.
  *
  */
-
-/*
- * To prevent the compiler from emitting GOT-indirected (and thus absolute)
- * references to the section markers, override their visibility as 'hidden'
- */
-#pragma GCC visibility push(hidden)
-#include <asm/sections.h>
-#pragma GCC visibility pop
-
 #include <linux/efi.h>
 #include <asm/efi.h>
+#include <asm/sections.h>
 
 #include "efistub.h"
+
+extern bool __nokaslr;
 
 efi_status_t __init handle_kernel_image(efi_system_table_t *sys_table_arg,
 					unsigned long *image_addr,
@@ -38,7 +32,7 @@ efi_status_t __init handle_kernel_image(efi_system_table_t *sys_table_arg,
 	u64 phys_seed = 0;
 
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
-		if (!nokaslr()) {
+		if (!__nokaslr) {
 			status = efi_get_random_bytes(sys_table_arg,
 						      sizeof(phys_seed),
 						      (u8 *)&phys_seed);
@@ -67,15 +61,24 @@ efi_status_t __init handle_kernel_image(efi_system_table_t *sys_table_arg,
 
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE) && phys_seed != 0) {
 		/*
+		 * If CONFIG_DEBUG_ALIGN_RODATA is not set, produce a
+		 * displacement in the interval [0, MIN_KIMG_ALIGN) that
+		 * is a multiple of the minimal segment alignment (SZ_64K)
+		 */
+		u32 mask = (MIN_KIMG_ALIGN - 1) & ~(SZ_64K - 1);
+		u32 offset = !IS_ENABLED(CONFIG_DEBUG_ALIGN_RODATA) ?
+			     (phys_seed >> 32) & mask : TEXT_OFFSET;
+
+		/*
 		 * If KASLR is enabled, and we have some randomness available,
 		 * locate the kernel at a randomized offset in physical memory.
 		 */
-		*reserve_size = kernel_memsize + TEXT_OFFSET;
+		*reserve_size = kernel_memsize + offset;
 		status = efi_random_alloc(sys_table_arg, *reserve_size,
 					  MIN_KIMG_ALIGN, reserve_addr,
-					  phys_seed);
+					  (u32)phys_seed);
 
-		*image_addr = *reserve_addr + TEXT_OFFSET;
+		*image_addr = *reserve_addr + offset;
 	} else {
 		/*
 		 * Else, try a straight allocation at the preferred offset.

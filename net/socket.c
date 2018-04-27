@@ -112,6 +112,12 @@
 unsigned int sysctl_net_busy_read __read_mostly;
 unsigned int sysctl_net_busy_poll __read_mostly;
 #endif
+#ifdef CONFIG_HUAWEI_XENGINE
+#include <huawei_platform/emcom/emcom_xengine.h>
+#endif
+#ifdef CONFIG_HUAWEI_BASTET
+#include <huawei_platform/power/bastet/bastet.h>
+#endif
 
 static ssize_t sock_read_iter(struct kiocb *iocb, struct iov_iter *to);
 static ssize_t sock_write_iter(struct kiocb *iocb, struct iov_iter *from);
@@ -564,6 +570,11 @@ static struct socket *sock_alloc(void)
 	inode->i_uid = current_fsuid();
 	inode->i_gid = current_fsgid();
 	inode->i_op = &sockfs_inode_ops;
+#ifdef CONFIG_HUAWEI_KSTATE
+	if (sock != NULL && current != NULL) {
+		sock->pid = current->tgid;
+	}
+#endif
 
 	this_cpu_add(sockets_in_use, 1);
 	return sock;
@@ -1194,6 +1205,9 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	if (err)
 		goto out_sock_release;
 	*res = sock;
+#ifdef CONFIG_HUAWEI_XENGINE
+	Emcom_Xengine_Mpip_Bind2Device(sock->sk);
+#endif
 
 	return 0;
 
@@ -1711,6 +1725,7 @@ SYSCALL_DEFINE6(recvfrom, int, fd, void __user *, ubuf, size_t, size,
 	/* We assume all kernel code knows the size of sockaddr_storage */
 	msg.msg_namelen = 0;
 	msg.msg_iocb = NULL;
+	msg.msg_flags = 0;
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
 	err = sock_recvmsg(sock, &msg, iov_iter_count(&msg.msg_iter), flags);

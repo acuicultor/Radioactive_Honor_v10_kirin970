@@ -115,6 +115,17 @@ enum {
 #define TCP_CC_INFO		26	/* Get Congestion Control (optional) info */
 #define TCP_SAVE_SYN		27	/* Record SYN headers for new connections */
 #define TCP_SAVED_SYN		28	/* Get SYN headers recorded for connection */
+#ifdef CONFIG_MPTCP
+#define MPTCP_ENABLED		42
+#define MPTCP_SCHEDULER		43
+#define MPTCP_PATH_MANAGER	44
+#define MPTCP_INFO			45
+
+#define MPTCP_INFO_FLAG_SAVE_MASTER	0x01
+#endif
+#ifdef CONFIG_HUAWEI_BASTET
+#define TCP_RECONN		100
+#endif
 
 struct tcp_repair_opt {
 	__u32	opt_code;
@@ -145,8 +156,15 @@ enum tcp_ca_state {
 #define TCPF_CA_CWR	(1<<TCP_CA_CWR)
 	TCP_CA_Recovery = 3,
 #define TCPF_CA_Recovery (1<<TCP_CA_Recovery)
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	TCP_CA_Loss = 4,
+#define TCPF_CA_Loss	(1<<TCP_CA_Loss)
+	TCP_CA_Modem_Drop = 5
+#define TCPF_CA_Modem_Drop (1<<TCP_CA_Modem_Drop)
+#else
 	TCP_CA_Loss = 4
 #define TCPF_CA_Loss	(1<<TCP_CA_Loss)
+#endif
 };
 
 struct tcp_info {
@@ -157,6 +175,9 @@ struct tcp_info {
 	__u8	tcpi_backoff;
 	__u8	tcpi_options;
 	__u8	tcpi_snd_wscale : 4, tcpi_rcv_wscale : 4;
+#ifdef CONFIG_TCP_CONG_BBR
+	__u8	tcpi_delivery_rate_app_limited:1;
+#endif
 
 	__u32	tcpi_rto;
 	__u32	tcpi_ato;
@@ -196,8 +217,60 @@ struct tcp_info {
 	__u64	tcpi_bytes_received; /* RFC4898 tcpEStatsAppHCThruOctetsReceived */
 	__u32	tcpi_segs_out;	     /* RFC4898 tcpEStatsPerfSegsOut */
 	__u32	tcpi_segs_in;	     /* RFC4898 tcpEStatsPerfSegsIn */
+
+#ifdef CONFIG_TCP_CONG_BBR
+	__u64   tcpi_delivery_rate;
+#endif
 };
 
+#ifdef CONFIG_MPTCP
+struct mptcp_meta_info {
+	__u8	mptcpi_state;
+	__u8	mptcpi_retransmits;
+	__u8	mptcpi_probes;
+	__u8	mptcpi_backoff;
+
+	__u32	mptcpi_rto;
+	__u32	mptcpi_unacked;
+
+	/* Times. */
+	__u32	mptcpi_last_data_sent;
+	__u32	mptcpi_last_data_recv;
+	__u32	mptcpi_last_ack_recv;
+
+	__u32	mptcpi_total_retrans;
+
+	__u64	mptcpi_bytes_acked;    /* RFC4898 tcpEStatsAppHCThruOctetsAcked */
+	__u64	mptcpi_bytes_received; /* RFC4898 tcpEStatsAppHCThruOctetsReceived */
+};
+
+struct mptcp_sub_info {
+	union {
+		struct sockaddr src;
+		struct sockaddr_in src_v4;
+		struct sockaddr_in6 src_v6;
+	};
+
+	union {
+		struct sockaddr dst;
+		struct sockaddr_in dst_v4;
+		struct sockaddr_in6 dst_v6;
+	};
+};
+
+struct mptcp_info {
+	__u32	tcp_info_len;	/* Length of each struct tcp_info in subflows pointer */
+	__u32	sub_len;	/* Total length of memory pointed to by subflows pointer */
+	__u32	meta_len;	/* Length of memory pointed to by meta_info */
+	__u32	sub_info_len;	/* Length of each struct mptcp_sub_info in subflow_info pointer */
+	__u32	total_sub_info_len;	/* Total length of memory pointed to by subflow_info */
+
+	struct mptcp_meta_info	*meta_info;
+	struct tcp_info		*initial;
+	struct tcp_info		*subflows;	/* Pointer to array of tcp_info structs */
+	struct mptcp_sub_info	*subflow_info;
+};
+#endif
 /* for TCP_MD5SIG socket option */
 #define TCP_MD5SIG_MAXKEYLEN	80
 

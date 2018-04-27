@@ -3,7 +3,7 @@
  *
  * Error Recovery Procedures (ERP).
  *
- * Copyright IBM Corp. 2002, 2016
+ * Copyright IBM Corp. 2002, 2010
  */
 
 #define KMSG_COMPONENT "zfcp"
@@ -193,8 +193,9 @@ static struct zfcp_erp_action *zfcp_erp_setup_act(int need, u32 act_status,
 		atomic_or(ZFCP_STATUS_COMMON_ERP_INUSE,
 				&zfcp_sdev->status);
 		erp_action = &zfcp_sdev->erp_action;
-		WARN_ON_ONCE(erp_action->port != port);
-		WARN_ON_ONCE(erp_action->sdev != sdev);
+		memset(erp_action, 0, sizeof(struct zfcp_erp_action));
+		erp_action->port = port;
+		erp_action->sdev = sdev;
 		if (!(atomic_read(&zfcp_sdev->status) &
 		      ZFCP_STATUS_COMMON_RUNNING))
 			act_status |= ZFCP_STATUS_ERP_CLOSE_ONLY;
@@ -207,8 +208,8 @@ static struct zfcp_erp_action *zfcp_erp_setup_act(int need, u32 act_status,
 		zfcp_erp_action_dismiss_port(port);
 		atomic_or(ZFCP_STATUS_COMMON_ERP_INUSE, &port->status);
 		erp_action = &port->erp_action;
-		WARN_ON_ONCE(erp_action->port != port);
-		WARN_ON_ONCE(erp_action->sdev != NULL);
+		memset(erp_action, 0, sizeof(struct zfcp_erp_action));
+		erp_action->port = port;
 		if (!(atomic_read(&port->status) & ZFCP_STATUS_COMMON_RUNNING))
 			act_status |= ZFCP_STATUS_ERP_CLOSE_ONLY;
 		break;
@@ -218,8 +219,7 @@ static struct zfcp_erp_action *zfcp_erp_setup_act(int need, u32 act_status,
 		zfcp_erp_action_dismiss_adapter(adapter);
 		atomic_or(ZFCP_STATUS_COMMON_ERP_INUSE, &adapter->status);
 		erp_action = &adapter->erp_action;
-		WARN_ON_ONCE(erp_action->port != NULL);
-		WARN_ON_ONCE(erp_action->sdev != NULL);
+		memset(erp_action, 0, sizeof(struct zfcp_erp_action));
 		if (!(atomic_read(&adapter->status) &
 		      ZFCP_STATUS_COMMON_RUNNING))
 			act_status |= ZFCP_STATUS_ERP_CLOSE_ONLY;
@@ -229,11 +229,7 @@ static struct zfcp_erp_action *zfcp_erp_setup_act(int need, u32 act_status,
 		return NULL;
 	}
 
-	WARN_ON_ONCE(erp_action->adapter != adapter);
-	memset(&erp_action->list, 0, sizeof(erp_action->list));
-	memset(&erp_action->timer, 0, sizeof(erp_action->timer));
-	erp_action->step = ZFCP_ERP_STEP_UNINITIALIZED;
-	erp_action->fsf_req_id = 0;
+	erp_action->adapter = adapter;
 	erp_action->action = need;
 	erp_action->status = act_status;
 
@@ -1208,62 +1204,6 @@ static void zfcp_erp_action_dequeue(struct zfcp_erp_action *erp_action)
 	}
 }
 
-/**
- * zfcp_erp_try_rport_unblock - unblock rport if no more/new recovery
- * @port: zfcp_port whose fc_rport we should try to unblock
- */
-static void zfcp_erp_try_rport_unblock(struct zfcp_port *port)
-{
-	unsigned long flags;
-	struct zfcp_adapter *adapter = port->adapter;
-	int port_status;
-	struct Scsi_Host *shost = adapter->scsi_host;
-	struct scsi_device *sdev;
-
-	write_lock_irqsave(&adapter->erp_lock, flags);
-	port_status = atomic_read(&port->status);
-	if ((port_status & ZFCP_STATUS_COMMON_UNBLOCKED)    == 0 ||
-	    (port_status & (ZFCP_STATUS_COMMON_ERP_INUSE |
-			    ZFCP_STATUS_COMMON_ERP_FAILED)) != 0) {
-		/* new ERP of severity >= port triggered elsewhere meanwhile or
-		 * local link down (adapter erp_failed but not clear unblock)
-		 */
-		zfcp_dbf_rec_run_lvl(4, "ertru_p", &port->erp_action);
-		write_unlock_irqrestore(&adapter->erp_lock, flags);
-		return;
-	}
-	spin_lock(shost->host_lock);
-	__shost_for_each_device(sdev, shost) {
-		struct zfcp_scsi_dev *zsdev = sdev_to_zfcp(sdev);
-		int lun_status;
-
-		if (zsdev->port != port)
-			continue;
-		/* LUN under port of interest */
-		lun_status = atomic_read(&zsdev->status);
-		if ((lun_status & ZFCP_STATUS_COMMON_ERP_FAILED) != 0)
-			continue; /* unblock rport despite failed LUNs */
-		/* LUN recovery not given up yet [maybe follow-up pending] */
-		if ((lun_status & ZFCP_STATUS_COMMON_UNBLOCKED) == 0 ||
-		    (lun_status & ZFCP_STATUS_COMMON_ERP_INUSE) != 0) {
-			/* LUN blocked:
-			 * not yet unblocked [LUN recovery pending]
-			 * or meanwhile blocked [new LUN recovery triggered]
-			 */
-			zfcp_dbf_rec_run_lvl(4, "ertru_l", &zsdev->erp_action);
-			spin_unlock(shost->host_lock);
-			write_unlock_irqrestore(&adapter->erp_lock, flags);
-			return;
-		}
-	}
-	/* now port has no child or all children have completed recovery,
-	 * and no ERP of severity >= port was meanwhile triggered elsewhere
-	 */
-	zfcp_scsi_schedule_rport_register(port);
-	spin_unlock(shost->host_lock);
-	write_unlock_irqrestore(&adapter->erp_lock, flags);
-}
-
 static void zfcp_erp_action_cleanup(struct zfcp_erp_action *act, int result)
 {
 	struct zfcp_adapter *adapter = act->adapter;
@@ -1274,18 +1214,11 @@ static void zfcp_erp_action_cleanup(struct zfcp_erp_action *act, int result)
 	case ZFCP_ERP_ACTION_REOPEN_LUN:
 		if (!(act->status & ZFCP_STATUS_ERP_NO_REF))
 			scsi_device_put(sdev);
-		zfcp_erp_try_rport_unblock(port);
 		break;
 
 	case ZFCP_ERP_ACTION_REOPEN_PORT:
-		/* This switch case might also happen after a forced reopen
-		 * was successfully done and thus overwritten with a new
-		 * non-forced reopen at `ersfs_2'. In this case, we must not
-		 * do the clean-up of the non-forced version.
-		 */
-		if (act->step != ZFCP_ERP_STEP_UNINITIALIZED)
-			if (result == ZFCP_ERP_SUCCEEDED)
-				zfcp_erp_try_rport_unblock(port);
+		if (result == ZFCP_ERP_SUCCEEDED)
+			zfcp_scsi_schedule_rport_register(port);
 		/* fall through */
 	case ZFCP_ERP_ACTION_REOPEN_PORT_FORCED:
 		put_device(&port->dev);

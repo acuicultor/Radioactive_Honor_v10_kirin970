@@ -56,7 +56,7 @@
 #include <linux/random.h>
 #include <linux/trace_events.h>
 #include <linux/suspend.h>
-
+#include <linux/hisi/mntn_record_sp.h>
 #include "tree.h"
 #include "rcu.h"
 
@@ -759,12 +759,6 @@ void rcu_irq_exit(void)
 
 	local_irq_save(flags);
 	rdtp = this_cpu_ptr(&rcu_dynticks);
-
-	/* Page faults can happen in NMI handlers, so check... */
-	if (READ_ONCE(rdtp->dynticks_nmi_nesting))
-		return;
-
-	RCU_LOCKDEP_WARN(!irqs_disabled(), "rcu_irq_exit() invoked with irqs enabled!!!");
 	oldval = rdtp->dynticks_nesting;
 	rdtp->dynticks_nesting--;
 	WARN_ON_ONCE(IS_ENABLED(CONFIG_RCU_EQS_DEBUG) &&
@@ -893,12 +887,6 @@ void rcu_irq_enter(void)
 
 	local_irq_save(flags);
 	rdtp = this_cpu_ptr(&rcu_dynticks);
-
-	/* Page faults can happen in NMI handlers, so check... */
-	if (READ_ONCE(rdtp->dynticks_nmi_nesting))
-		return;
-
-	RCU_LOCKDEP_WARN(!irqs_disabled(), "rcu_irq_enter() invoked with irqs enabled!!!");
 	oldval = rdtp->dynticks_nesting;
 	rdtp->dynticks_nesting++;
 	WARN_ON_ONCE(IS_ENABLED(CONFIG_RCU_EQS_DEBUG) &&
@@ -1229,8 +1217,10 @@ static void rcu_dump_cpu_stacks(struct rcu_state *rsp)
 		raw_spin_lock_irqsave(&rnp->lock, flags);
 		if (rnp->qsmask != 0) {
 			for (cpu = 0; cpu <= rnp->grphi - rnp->grplo; cpu++)
-				if (rnp->qsmask & (1UL << cpu))
+				if (rnp->qsmask & (1UL << cpu)){
 					dump_cpu_task(rnp->grplo + cpu);
+					mntn_show_stack_othercpus(rnp->grplo + cpu);
+				}
 		}
 		raw_spin_unlock_irqrestore(&rnp->lock, flags);
 	}

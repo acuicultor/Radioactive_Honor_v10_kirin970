@@ -75,6 +75,9 @@
 #define ARM_CPU_PART_FOUNDATION		0xD00
 #define ARM_CPU_PART_CORTEX_A57		0xD07
 #define ARM_CPU_PART_CORTEX_A53		0xD03
+#define ARM_CPU_PART_CORTEX_ARTEMIS	0xD09
+#define ARM_CPU_PART_ENYO		0xD40
+
 
 #define APM_CPU_PART_POTENZA		0x000
 
@@ -88,11 +91,7 @@
 
 #include <asm/sysreg.h>
 
-#define read_cpuid(reg) ({						\
-	u64 __val;							\
-	asm("mrs_s	%0, " __stringify(reg) : "=r" (__val));		\
-	__val;								\
-})
+#define read_cpuid(reg)			read_sysreg_s(reg)
 
 /*
  * The CPU ID never changes at run time, so we might as well tell the

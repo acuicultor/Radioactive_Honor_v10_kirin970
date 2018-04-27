@@ -10,9 +10,18 @@
  * This has not yet undergone a rigorous security audit.
  */
 
+#include <crypto/skcipher.h>
+#include <keys/encrypted-type.h>
+#include <keys/user-type.h>
+#include <linux/gfp.h>
+#include <linux/kernel.h>
+#include <linux/key.h>
+#include <linux/list.h>
+#include <linux/mempool.h>
+#include <linux/random.h>
 #include <linux/scatterlist.h>
 #include <linux/ratelimit.h>
-#include "fscrypt_private.h"
+#include <linux/fscrypto.h>
 
 /**
  * fname_crypt_complete() - completion callback for filename crypto
@@ -159,8 +168,6 @@ static int fname_decrypt(struct inode *inode,
 static const char *lookup_table =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
 
-#define BASE64_CHARS(nbytes)	DIV_ROUND_UP((nbytes) * 4, 3)
-
 /**
  * digest_encode() -
  *
@@ -211,7 +218,7 @@ static int digest_decode(const char *src, int len, char *dst)
 	return cp - dst;
 }
 
-u32 fscrypt_fname_encrypted_size(const struct inode *inode, u32 ilen)
+u32 fscrypt_fname_encrypted_size(struct inode *inode, u32 ilen)
 {
 	int padding = 32;
 	struct fscrypt_info *ci = inode->i_crypt_info;
@@ -229,17 +236,14 @@ EXPORT_SYMBOL(fscrypt_fname_encrypted_size);
  * Allocates an output buffer that is sufficient for the crypto operation
  * specified by the context and the direction.
  */
-int fscrypt_fname_alloc_buffer(const struct inode *inode,
+int fscrypt_fname_alloc_buffer(struct inode *inode,
 				u32 ilen, struct fscrypt_str *crypto_str)
 {
-	u32 olen = fscrypt_fname_encrypted_size(inode, ilen);
-	const u32 max_encoded_len =
-		max_t(u32, BASE64_CHARS(FSCRYPT_FNAME_MAX_UNDIGESTED_SIZE),
-		      1 + BASE64_CHARS(sizeof(struct fscrypt_digested_name)));
+	unsigned int olen = fscrypt_fname_encrypted_size(inode, ilen);
 
 	crypto_str->len = olen;
-	olen = max(olen, max_encoded_len);
-
+	if (olen < FS_FNAME_CRYPTO_DIGEST_SIZE * 2)
+		olen = FS_FNAME_CRYPTO_DIGEST_SIZE * 2;
 	/*
 	 * Allocated buffer can hold one more character to null-terminate the
 	 * string
@@ -271,10 +275,6 @@ EXPORT_SYMBOL(fscrypt_fname_free_buffer);
  *
  * The caller must have allocated sufficient memory for the @oname string.
  *
- * If the key is available, we'll decrypt the disk name; otherwise, we'll encode
- * it for presentation.  Short names are directly base64-encoded, while long
- * names are encoded in fscrypt_digested_name format.
- *
  * Return: 0 on success, -errno on failure
  */
 int fscrypt_fname_disk_to_usr(struct inode *inode,
@@ -283,7 +283,7 @@ int fscrypt_fname_disk_to_usr(struct inode *inode,
 			struct fscrypt_str *oname)
 {
 	const struct qstr qname = FSTR_TO_QSTR(iname);
-	struct fscrypt_digested_name digested_name;
+	char buf[24];
 
 	if (fscrypt_is_dot_dotdot(&qname)) {
 		oname->name[0] = '.';
@@ -295,27 +295,24 @@ int fscrypt_fname_disk_to_usr(struct inode *inode,
 	if (iname->len < FS_CRYPTO_BLOCK_SIZE)
 		return -EUCLEAN;
 
-	if (inode->i_crypt_info)
+	if (inode->i_crypt_info &&
+			!inode->i_sb->s_cop->is_encrypted_fixed(inode))
 		return fname_decrypt(inode, iname, oname);
 
-	if (iname->len <= FSCRYPT_FNAME_MAX_UNDIGESTED_SIZE) {
+	if (iname->len <= FS_FNAME_CRYPTO_DIGEST_SIZE) {
 		oname->len = digest_encode(iname->name, iname->len,
 					   oname->name);
 		return 0;
 	}
 	if (hash) {
-		digested_name.hash = hash;
-		digested_name.minor_hash = minor_hash;
+		memcpy(buf, &hash, 4);
+		memcpy(buf + 4, &minor_hash, 4);
 	} else {
-		digested_name.hash = 0;
-		digested_name.minor_hash = 0;
+		memset(buf, 0, 8);
 	}
-	memcpy(digested_name.digest,
-	       FSCRYPT_FNAME_DIGEST(iname->name, iname->len),
-	       FSCRYPT_FNAME_DIGEST_SIZE);
+	memcpy(buf + 8, iname->name + iname->len - 16, 16);
 	oname->name[0] = '_';
-	oname->len = 1 + digest_encode((const char *)&digested_name,
-				       sizeof(digested_name), oname->name + 1);
+	oname->len = 1 + digest_encode(buf, 24, oname->name + 1);
 	return 0;
 }
 EXPORT_SYMBOL(fscrypt_fname_disk_to_usr);
@@ -345,39 +342,14 @@ int fscrypt_fname_usr_to_disk(struct inode *inode,
 	 * in a directory. Consequently, a user space name cannot be mapped to
 	 * a disk-space name
 	 */
-	return -ENOKEY;
+	return -EACCES;
 }
 EXPORT_SYMBOL(fscrypt_fname_usr_to_disk);
 
-/**
- * fscrypt_setup_filename() - prepare to search a possibly encrypted directory
- * @dir: the directory that will be searched
- * @iname: the user-provided filename being searched for
- * @lookup: 1 if we're allowed to proceed without the key because it's
- *	->lookup() or we're finding the dir_entry for deletion; 0 if we cannot
- *	proceed without the key because we're going to create the dir_entry.
- * @fname: the filename information to be filled in
- *
- * Given a user-provided filename @iname, this function sets @fname->disk_name
- * to the name that would be stored in the on-disk directory entry, if possible.
- * If the directory is unencrypted this is simply @iname.  Else, if we have the
- * directory's encryption key, then @iname is the plaintext, so we encrypt it to
- * get the disk_name.
- *
- * Else, for keyless @lookup operations, @iname is the presented ciphertext, so
- * we decode it to get either the ciphertext disk_name (for short names) or the
- * fscrypt_digested_name (for long names).  Non-@lookup operations will be
- * impossible in this case, so we fail them with ENOKEY.
- *
- * If successful, fscrypt_free_filename() must be called later to clean up.
- *
- * Return: 0 on success, -errno on failure
- */
 int fscrypt_setup_filename(struct inode *dir, const struct qstr *iname,
 			      int lookup, struct fscrypt_name *fname)
 {
-	int ret;
-	int digested;
+	int ret = 0, bigname = 0;
 
 	memset(fname, 0, sizeof(struct fscrypt_name));
 	fname->usr_fname = iname;
@@ -392,7 +364,7 @@ int fscrypt_setup_filename(struct inode *dir, const struct qstr *iname,
 	if (ret && ret != -EOPNOTSUPP)
 		return ret;
 
-	if (dir->i_crypt_info) {
+	if (dir->i_crypt_info && !dir->i_sb->s_cop->is_encrypted_fixed(dir)) {
 		ret = fscrypt_fname_alloc_buffer(dir, iname->len,
 							&fname->crypto_buf);
 		if (ret)
@@ -405,43 +377,31 @@ int fscrypt_setup_filename(struct inode *dir, const struct qstr *iname,
 		return 0;
 	}
 	if (!lookup)
-		return -ENOKEY;
+		return -EACCES;
 
 	/*
 	 * We don't have the key and we are doing a lookup; decode the
 	 * user-supplied name
 	 */
-	if (iname->name[0] == '_') {
-		if (iname->len !=
-		    1 + BASE64_CHARS(sizeof(struct fscrypt_digested_name)))
-			return -ENOENT;
-		digested = 1;
-	} else {
-		if (iname->len >
-		    BASE64_CHARS(FSCRYPT_FNAME_MAX_UNDIGESTED_SIZE))
-			return -ENOENT;
-		digested = 0;
-	}
+	if (iname->name[0] == '_')
+		bigname = 1;
+	if ((bigname && (iname->len != 33)) || (!bigname && (iname->len > 43)))
+		return -ENOENT;
 
-	fname->crypto_buf.name =
-		kmalloc(max_t(size_t, FSCRYPT_FNAME_MAX_UNDIGESTED_SIZE,
-			      sizeof(struct fscrypt_digested_name)),
-			GFP_KERNEL);
+	fname->crypto_buf.name = kmalloc(32, GFP_KERNEL);
 	if (fname->crypto_buf.name == NULL)
 		return -ENOMEM;
 
-	ret = digest_decode(iname->name + digested, iname->len - digested,
+	ret = digest_decode(iname->name + bigname, iname->len - bigname,
 				fname->crypto_buf.name);
 	if (ret < 0) {
 		ret = -ENOENT;
 		goto errout;
 	}
 	fname->crypto_buf.len = ret;
-	if (digested) {
-		const struct fscrypt_digested_name *n =
-			(const void *)fname->crypto_buf.name;
-		fname->hash = n->hash;
-		fname->minor_hash = n->minor_hash;
+	if (bigname) {
+		memcpy(&fname->hash, fname->crypto_buf.name, 4);
+		memcpy(&fname->minor_hash, fname->crypto_buf.name + 4, 4);
 	} else {
 		fname->disk_name.name = fname->crypto_buf.name;
 		fname->disk_name.len = fname->crypto_buf.len;
@@ -453,3 +413,12 @@ errout:
 	return ret;
 }
 EXPORT_SYMBOL(fscrypt_setup_filename);
+
+void fscrypt_free_filename(struct fscrypt_name *fname)
+{
+	kfree(fname->crypto_buf.name);
+	fname->crypto_buf.name = NULL;
+	fname->usr_fname = NULL;
+	fname->disk_name.name = NULL;
+}
+EXPORT_SYMBOL(fscrypt_free_filename);

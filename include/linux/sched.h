@@ -51,6 +51,11 @@ struct sched_param {
 #include <linux/resource.h>
 #include <linux/timer.h>
 #include <linux/hrtimer.h>
+
+#ifdef CONFIG_KCOV
+#include <linux/kcov.h>
+#endif
+
 #include <linux/task_io_accounting.h>
 #include <linux/latencytop.h>
 #include <linux/cred.h>
@@ -134,6 +139,9 @@ struct perf_event_context;
 struct blk_plug;
 struct filename;
 struct nameidata;
+#ifdef CONFIG_HW_CGROUP_PIDS
+struct group_pids;
+#endif
 
 #define VMACACHE_BITS 2
 #define VMACACHE_SIZE (1U << VMACACHE_BITS)
@@ -169,6 +177,9 @@ extern int nr_threads;
 DECLARE_PER_CPU(unsigned long, process_counts);
 extern int nr_processes(void);
 extern unsigned long nr_running(void);
+#ifdef CONFIG_HISI_BIG_MAXFREQ_HOTPLUG
+extern unsigned int cpu_nr_runnings(struct cpumask *mask);
+#endif
 extern bool single_task_running(void);
 extern unsigned long nr_iowait(void);
 extern unsigned long nr_iowait_cpu(int cpu);
@@ -222,10 +233,9 @@ extern void proc_sched_set_task(struct task_struct *p);
 #define TASK_WAKING		256
 #define TASK_PARKED		512
 #define TASK_NOLOAD		1024
-#define TASK_NEW		2048
-#define TASK_STATE_MAX		4096
+#define TASK_STATE_MAX		2048
 
-#define TASK_STATE_TO_CHAR_STR "RSDTtXZxKWPNn"
+#define TASK_STATE_TO_CHAR_STR "RSDTtXZxKWPN"
 
 extern char ___assert_task_state[1 - 2*!!(
 		sizeof(TASK_STATE_TO_CHAR_STR)-1 != ilog2(TASK_STATE_MAX)+1)];
@@ -317,6 +327,22 @@ extern char ___assert_task_state[1 - 2*!!(
 
 /* Task command name length */
 #define TASK_COMM_LEN 16
+
+#ifdef CONFIG_HW_VIP_THREAD
+enum DYNAMIC_VIP_TYPE
+{
+	DYNAMIC_VIP_BINDER = 0,
+	DYNAMIC_VIP_RWSEM,
+	DYNAMIC_VIP_MUTEX,
+	DYNAMIC_VIP_SEM,
+	DYNAMIC_VIP_FUTEX,
+	DYNAMIC_VIP_MAX,
+};
+
+#define VIP_MSG_LEN 64
+#define VIP_DEPTH_MAX 2
+#endif
+
 
 enum task_event {
 	PUT_PREV_TASK   = 0,
@@ -793,10 +819,22 @@ struct signal_struct {
 	short oom_score_adj_min;	/* OOM kill score adjustment min value.
 					 * Only settable by CAP_SYS_RESOURCE. */
 
+#ifdef CONFIG_HW_DIE_CATCH
+	unsigned short unexpected_die_catch_flags; /* Only settable by CAP_SYS_RESOURCE and task*/
+#endif
 	struct mutex cred_guard_mutex;	/* guard against foreign influences on
 					 * credential calculations
 					 * (notably. ptrace) */
 };
+
+#ifdef CONFIG_HW_DIE_CATCH
+/*  if the process will die by SIGKILL,SIGTERM , it will send SIGABORT to notify userspace*/
+#define KILL_CATCH_FLAG     (0x1)
+/*  if the process will die by system call exit , it will print the log*/
+#define EXIT_CATCH_FLAG     (0x2)
+/*  if the process will die by system call exit , it will send SIGABORT to notify userspace*/
+#define EXIT_CATCH_ABORT_FLAG       (0x4)
+#endif
 
 /*
  * Bits in flags field of signal_struct.
@@ -813,16 +851,6 @@ struct signal_struct {
 #define SIGNAL_CLD_MASK		(SIGNAL_CLD_STOPPED|SIGNAL_CLD_CONTINUED)
 
 #define SIGNAL_UNKILLABLE	0x00000040 /* for init: ignore fatal signals */
-
-#define SIGNAL_STOP_MASK (SIGNAL_CLD_MASK | SIGNAL_STOP_STOPPED | \
-			  SIGNAL_STOP_CONTINUED)
-
-static inline void signal_set_stop_flags(struct signal_struct *sig,
-					 unsigned int flags)
-{
-	WARN_ON(sig->flags & (SIGNAL_GROUP_EXIT|SIGNAL_GROUP_COREDUMP));
-	sig->flags = (sig->flags & ~SIGNAL_STOP_MASK) | flags;
-}
 
 /* If true, all threads except ->group_exit_task have pending SIGKILL */
 static inline int signal_group_exit(const struct signal_struct *sig)
@@ -924,6 +952,15 @@ struct task_delay_info {
 	u64 freepages_start;
 	u64 freepages_delay;	/* wait for memory reclaim */
 	u32 freepages_count;	/* total count of memory reclaim */
+
+#ifdef CONFIG_HW_MEMORY_MONITOR
+	spinlock_t	allocpages_lock;
+	u64 allocpages_start;
+	u64 allocpages_delay;	/* wait for memoroy slowpath allocation */
+	u64 allocpages_count;	/* total count of memory slowpath allocation */
+	u64 allocpages_delay_max;
+	u64 allocpages_delay_max_order;
+#endif
 };
 #endif	/* CONFIG_TASK_DELAY_ACCT */
 
@@ -993,13 +1030,12 @@ struct wake_q_node {
 struct wake_q_head {
 	struct wake_q_node *first;
 	struct wake_q_node **lastp;
-	int count;
 };
 
 #define WAKE_Q_TAIL ((struct wake_q_node *) 0x01)
 
 #define WAKE_Q(name)					\
-	struct wake_q_head name = { WAKE_Q_TAIL, &name.first, 0 }
+	struct wake_q_head name = { WAKE_Q_TAIL, &name.first }
 
 extern void wake_q_add(struct wake_q_head *head,
 		       struct task_struct *task);
@@ -1016,7 +1052,7 @@ extern void wake_up_q(struct wake_q_head *head);
 #define SD_BALANCE_WAKE		0x0010  /* Balance on wakeup */
 #define SD_WAKE_AFFINE		0x0020	/* Wake task to waking CPU */
 #define SD_ASYM_CPUCAPACITY	0x0040  /* Groups have different max cpu capacities */
-#define SD_SHARE_CPUCAPACITY	0x0080	/* Domain members share cpu capacity */
+#define SD_SHARE_CPUCAPACITY	0x0080	/* Domain members share cpu power */
 #define SD_SHARE_POWERDOMAIN	0x0100	/* Domain members share power domain */
 #define SD_SHARE_PKG_RESOURCES	0x0200	/* Domain members share cpu pkg resources */
 #define SD_SERIALIZE		0x0400	/* Only a single load balancing instance */
@@ -1077,35 +1113,12 @@ unsigned long capacity_curr_of(int cpu);
 
 struct sched_group;
 
-struct eas_stats {
-	/* select_idle_sibling() stats */
-	u64 sis_attempts;
-	u64 sis_idle;
-	u64 sis_cache_affine;
-	u64 sis_suff_cap;
-	u64 sis_idle_cpu;
-	u64 sis_count;
-
-	/* select_energy_cpu_brute() stats */
-	u64 secb_attempts;
-	u64 secb_sync;
-	u64 secb_idle_bt;
-	u64 secb_insuff_cap;
-	u64 secb_no_nrg_sav;
-	u64 secb_nrg_sav;
-	u64 secb_count;
-
-	/* find_best_target() stats */
-	u64 fbt_attempts;
-	u64 fbt_no_cpu;
-	u64 fbt_no_sd;
-	u64 fbt_pref_idle;
-	u64 fbt_count;
-
-	/* cas */
-	/* select_task_rq_fair() stats */
-	u64 cas_attempts;
-	u64 cas_count;
+struct sched_domain_shared {
+	atomic_t	ref;
+	bool		overutilized;
+#ifdef CONFIG_HISI_EAS_SCHED
+	bool		overloaded;
+#endif
 };
 
 struct sched_domain {
@@ -1168,8 +1181,6 @@ struct sched_domain {
 	unsigned int ttwu_wake_remote;
 	unsigned int ttwu_move_affine;
 	unsigned int ttwu_move_balance;
-
-	struct eas_stats eas_stats;
 #endif
 #ifdef CONFIG_SCHED_DEBUG
 	char *name;
@@ -1178,6 +1189,7 @@ struct sched_domain {
 		void *private;		/* used during construction */
 		struct rcu_head rcu;	/* used during destruction */
 	};
+	struct sched_domain_shared *shared;
 
 	unsigned int span_weight;
 	/*
@@ -1213,6 +1225,7 @@ const struct sched_group_energy * const(*sched_domain_energy_f)(int cpu);
 
 struct sd_data {
 	struct sched_domain **__percpu sd;
+	struct sched_domain_shared **__percpu sds;
 	struct sched_group **__percpu sg;
 	struct sched_group_capacity **__percpu sgc;
 };
@@ -1328,35 +1341,6 @@ struct sched_statistics {
 	u64			nr_wakeups_affine_attempts;
 	u64			nr_wakeups_passive;
 	u64			nr_wakeups_idle;
-
-	/* select_idle_sibling() */
-	u64			nr_wakeups_sis_attempts;
-	u64			nr_wakeups_sis_idle;
-	u64			nr_wakeups_sis_cache_affine;
-	u64			nr_wakeups_sis_suff_cap;
-	u64			nr_wakeups_sis_idle_cpu;
-	u64			nr_wakeups_sis_count;
-
-	/* energy_aware_wake_cpu() */
-	u64			nr_wakeups_secb_attempts;
-	u64			nr_wakeups_secb_sync;
-	u64			nr_wakeups_secb_idle_bt;
-	u64			nr_wakeups_secb_insuff_cap;
-	u64			nr_wakeups_secb_no_nrg_sav;
-	u64			nr_wakeups_secb_nrg_sav;
-	u64			nr_wakeups_secb_count;
-
-	/* find_best_target() */
-	u64			nr_wakeups_fbt_attempts;
-	u64			nr_wakeups_fbt_no_cpu;
-	u64			nr_wakeups_fbt_no_sd;
-	u64			nr_wakeups_fbt_pref_idle;
-	u64			nr_wakeups_fbt_count;
-
-	/* cas */
-	/* select_task_rq_fair() */
-	u64			nr_wakeups_cas_attempts;
-	u64			nr_wakeups_cas_count;
 };
 #endif
 
@@ -1529,26 +1513,39 @@ struct tlbflush_unmap_batch {
 	bool writable;
 };
 
-struct task_struct {
-#ifdef CONFIG_THREAD_INFO_IN_TASK
-	/*
-	 * For reasons of header soup (see current_thread_info()), this
-	 * must be the first element of task_struct.
-	 */
-	struct thread_info thread_info;
+#ifdef CONFIG_HISI_SWAP_ZDATA
+struct reclaim_result {
+	unsigned nr_reclaimed;
+	unsigned nr_writedblock;
+	s64 elapsed_centisecs64;
+};
 #endif
+#ifdef CONFIG_BLK_DEV_THROTTLING
+struct blk_throtl_wb_stat {
+	u32 pages;
+	u32 bios;
+};
+#endif
+
+struct task_struct {
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
 	void *stack;
 	atomic_t usage;
 	unsigned int flags;	/* per process flags, defined below */
 	unsigned int ptrace;
 
+#ifdef CONFIG_HW_VIP_THREAD
+	int static_vip;
+	atomic64_t dynamic_vip;
+	struct list_head vip_entry;
+	int vip_depth;
+	u64 enqueue_time;
+	u64 dynamic_vip_start;
+#endif
+
 #ifdef CONFIG_SMP
 	struct llist_node wake_entry;
 	int on_cpu;
-#ifdef CONFIG_THREAD_INFO_IN_TASK
-	unsigned int cpu;	/* current CPU */
-#endif
 	unsigned int wakee_flips;
 	unsigned long wakee_flip_decay_ts;
 	struct task_struct *last_wakee;
@@ -1569,7 +1566,6 @@ struct task_struct {
 	 * of this task
 	 */
 	u32 init_load_pct;
-	u64 last_sleep_ts;
 #endif
 
 #ifdef CONFIG_CGROUP_SCHED
@@ -1696,6 +1692,9 @@ struct task_struct {
 
 	cputime_t utime, stime, utimescaled, stimescaled;
 	cputime_t gtime;
+#ifdef CONFIG_CPU_FREQ_POWER_STAT
+	unsigned long long cpu_power;
+#endif
 	struct prev_cputime prev_cputime;
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
 	seqlock_t vtime_seqlock;
@@ -1809,6 +1808,9 @@ struct task_struct {
 	struct held_lock held_locks[MAX_LOCK_DEPTH];
 	gfp_t lockdep_reclaim_gfp;
 #endif
+#ifdef CONFIG_UBSAN
+	unsigned int in_ubsan;
+#endif
 
 /* journalling filesystem info */
 	void *journal_info;
@@ -1819,6 +1821,9 @@ struct task_struct {
 #ifdef CONFIG_BLOCK
 /* stack plugging */
 	struct blk_plug *plug;
+#endif
+#ifdef CONFIG_BLK_DEV_THROTTLING
+	struct blk_throtl_wb_stat wb_stat;
 #endif
 
 /* VM state */
@@ -1847,6 +1852,10 @@ struct task_struct {
 	struct css_set __rcu *cgroups;
 	/* cg_list protected by css_set_lock and tsk->alloc_lock */
 	struct list_head cg_list;
+#endif
+#ifdef CONFIG_HW_CGROUP_PIDS
+        struct list_head group_pids_list;
+        struct group_pids *group_pids;
 #endif
 #ifdef CONFIG_FUTEX
 	struct robust_list_head __user *robust_list;
@@ -1973,6 +1982,16 @@ struct task_struct {
 	/* bitmask and counter of trace recursion */
 	unsigned long trace_recursion;
 #endif /* CONFIG_TRACING */
+#ifdef CONFIG_KCOV
+	/* Coverage collection mode enabled for this task (0 if disabled). */
+	enum kcov_mode kcov_mode;
+	/* Size of the kcov_area. */
+	unsigned kcov_size;
+	/* Buffer for coverage collection. */
+	void *kcov_area;
+	/* kcov desciptor wired with this task or NULL. */
+	struct kcov *kcov;
+#endif
 #ifdef CONFIG_MEMCG
 	struct mem_cgroup *memcg_in_oom;
 	gfp_t memcg_oom_gfp_mask;
@@ -1990,6 +2009,9 @@ struct task_struct {
 #endif
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 	unsigned long	task_state_change;
+#endif
+#ifdef CONFIG_HISI_SWAP_ZDATA
+	struct reclaim_result *proc_reclaimed_result;
 #endif
 	int pagefault_disabled;
 /* CPU-specific state of this task */
@@ -2110,7 +2132,6 @@ static inline pid_t task_tgid_nr(struct task_struct *tsk)
 {
 	return tsk->tgid;
 }
-
 
 static inline int pid_alive(const struct task_struct *p);
 
@@ -2271,8 +2292,13 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 #define PF_KTHREAD	0x00200000	/* I am a kernel thread */
 #define PF_RANDOMIZE	0x00400000	/* randomize virtual address space */
 #define PF_SWAPWRITE	0x00800000	/* Allowed to write to swap */
+#define PF_SHRINK_ALL	0x01000000	/* I'm shrink_all */
+#ifdef CONFIG_HISI_SPECIAL_SCENE_POOL
+#define PF_SPECIAL_SCENE_SHRINK	0x02000000	/* I'm special scene shrinker */
+#endif
 #define PF_NO_SETAFFINITY 0x04000000	/* Userland is not allowed to meddle with cpus_allowed */
 #define PF_MCE_EARLY    0x08000000      /* Early kill for mce process policy */
+#define PF_MUTEX_GC	0x10000000	/* whether this task hold the GC mutex */
 #define PF_MUTEX_TESTER	0x20000000	/* Thread belongs to the rt mutex tester */
 #define PF_FREEZER_SKIP	0x40000000	/* Freezer should not count it as freezable */
 #define PF_SUSPEND_TASK 0x80000000      /* this thread called freeze_processes and should not be frozen */
@@ -2329,6 +2355,9 @@ static inline void memalloc_noio_restore(unsigned int flags)
 #define PFA_SPREAD_PAGE  1      /* Spread page cache over cpuset */
 #define PFA_SPREAD_SLAB  2      /* Spread some slab caches over cpuset */
 
+#define PFA_SLEEP_ON_THROTL	25
+#define PFA_FLUSHER		26
+#define PFA_IN_PAGEFAULT	27
 
 #define TASK_PFA_TEST(name, func)					\
 	static inline bool task_##func(struct task_struct *p)		\
@@ -2350,6 +2379,18 @@ TASK_PFA_CLEAR(SPREAD_PAGE, spread_page)
 TASK_PFA_TEST(SPREAD_SLAB, spread_slab)
 TASK_PFA_SET(SPREAD_SLAB, spread_slab)
 TASK_PFA_CLEAR(SPREAD_SLAB, spread_slab)
+
+TASK_PFA_TEST(SLEEP_ON_THROTL, sleep_on_throtl)
+TASK_PFA_SET(SLEEP_ON_THROTL, sleep_on_throtl)
+TASK_PFA_CLEAR(SLEEP_ON_THROTL, sleep_on_throtl)
+
+TASK_PFA_TEST(FLUSHER, flusher)
+TASK_PFA_SET(FLUSHER, flusher)
+TASK_PFA_CLEAR(FLUSHER, flusher)
+
+TASK_PFA_TEST(IN_PAGEFAULT, in_pagefault)
+TASK_PFA_SET(IN_PAGEFAULT, in_pagefault)
+TASK_PFA_CLEAR(IN_PAGEFAULT, in_pagefault)
 
 /*
  * task->jobctl flags
@@ -2583,9 +2624,7 @@ extern void set_curr_task(int cpu, struct task_struct *p);
 void yield(void);
 
 union thread_union {
-#ifndef CONFIG_THREAD_INFO_IN_TASK
 	struct thread_info thread_info;
-#endif
 	unsigned long stack[THREAD_SIZE/sizeof(long)];
 };
 
@@ -2980,34 +3019,16 @@ static inline void threadgroup_change_end(struct task_struct *tsk)
 	cgroup_threadgroup_change_end(tsk);
 }
 
-#ifdef CONFIG_THREAD_INFO_IN_TASK
+#ifndef __HAVE_THREAD_FUNCTIONS
 
-static inline struct thread_info *task_thread_info(struct task_struct *task)
-{
-	return &task->thread_info;
-}
-
-/*
- * When accessing the stack of a non-current task that might exit, use
- * try_get_task_stack() instead.  task_stack_page will return a pointer
- * that could get freed out from under you.
- */
-static inline void *task_stack_page(const struct task_struct *task)
-{
-	return task->stack;
-}
-
-#define setup_thread_stack(new,old)	do { } while(0)
-
-static inline unsigned long *end_of_stack(const struct task_struct *task)
-{
-	return task->stack;
-}
-
-#elif !defined(__HAVE_THREAD_FUNCTIONS)
-
+#ifdef CONFIG_HUAWEI_KERNEL_STACK_RANDOMIZE_STRONG
+#include <chipset_common/kernel_harden/kaslr.h>
+#define task_thread_info(task)	((struct thread_info *)((task)->stack + kti_offset))
+#else
 #define task_thread_info(task)	((struct thread_info *)(task)->stack)
-#define task_stack_page(task)	((void *)(task)->stack)
+#endif
+
+#define task_stack_page(task)	((task)->stack)
 
 static inline void setup_thread_stack(struct task_struct *p, struct task_struct *org)
 {
@@ -3034,14 +3055,6 @@ static inline unsigned long *end_of_stack(struct task_struct *p)
 }
 
 #endif
-
-static inline void *try_get_task_stack(struct task_struct *tsk)
-{
-	return task_stack_page(tsk);
-}
-
-static inline void put_task_stack(struct task_struct *tsk) {}
-
 #define task_stack_end_corrupted(task) \
 		(*(end_of_stack(task)) != STACK_END_MAGIC)
 
@@ -3307,11 +3320,7 @@ static inline void ptrace_signal_wake_up(struct task_struct *t, bool resume)
 
 static inline unsigned int task_cpu(const struct task_struct *p)
 {
-#ifdef CONFIG_THREAD_INFO_IN_TASK
-	return p->cpu;
-#else
 	return task_thread_info(p)->cpu;
-#endif
 }
 
 static inline int task_node(const struct task_struct *p)
@@ -3355,6 +3364,17 @@ static inline void add_wchar(struct task_struct *tsk, ssize_t amt)
 	tsk->ioac.wchar += amt;
 }
 
+static inline void add_file_rchar(struct task_struct *tsk, ssize_t amt)
+{
+
+	tsk->ioac.file_rchar += amt;
+}
+
+static inline void add_file_wchar(struct task_struct *tsk, ssize_t amt)
+{
+	tsk->ioac.file_wchar += amt;
+}
+
 static inline void inc_syscr(struct task_struct *tsk)
 {
 	tsk->ioac.syscr++;
@@ -3375,6 +3395,14 @@ static inline void add_rchar(struct task_struct *tsk, ssize_t amt)
 }
 
 static inline void add_wchar(struct task_struct *tsk, ssize_t amt)
+{
+}
+
+static inline void add_file_rchar(struct task_struct *tsk, ssize_t amt)
+{
+}
+
+static inline void add_file_wchar(struct task_struct *tsk, ssize_t amt)
 {
 }
 
@@ -3427,6 +3455,8 @@ static inline unsigned long rlimit_max(unsigned int limit)
 #define SCHED_CPUFREQ_RT        (1U << 0)
 #define SCHED_CPUFREQ_DL        (1U << 1)
 #define SCHED_CPUFREQ_IOWAIT    (1U << 2)
+
+#define SCHED_CPUFREQ_RT_DL     (SCHED_CPUFREQ_RT | SCHED_CPUFREQ_DL)
 
 #ifdef CONFIG_CPU_FREQ
 struct update_util_data {

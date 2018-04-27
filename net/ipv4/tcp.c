@@ -272,6 +272,9 @@
 
 #include <net/icmp.h>
 #include <net/inet_common.h>
+#ifdef CONFIG_MPTCP
+#include <net/mptcp.h>
+#endif
 #include <net/tcp.h>
 #include <net/xfrm.h>
 #include <net/ip.h>
@@ -281,6 +284,23 @@
 #include <asm/ioctls.h>
 #include <asm/unaligned.h>
 #include <net/busy_poll.h>
+
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+#include <net/tcp_crosslayer.h>
+#endif
+
+#ifdef CONFIG_HW_WIFIPRO
+#include <hwnet/ipv4/wifipro_tcp_monitor.h>
+#endif
+
+
+#ifdef CONFIG_HUAWEI_XENGINE
+#include <huawei_platform/emcom/emcom_xengine.h>
+#endif
+
+#ifdef CONFIG_HW_NETWORK_AWARE
+#include <network_aware/network_aware.h>
+#endif
 
 int sysctl_tcp_fin_timeout __read_mostly = TCP_FIN_TIMEOUT;
 
@@ -372,6 +392,26 @@ static int retrans_to_secs(u8 retrans, int timeout, int rto_max)
 	return period;
 }
 
+#ifdef CONFIG_MPTCP
+const struct tcp_sock_ops tcp_specific = {
+	.__select_window		= __tcp_select_window,
+	.select_window			= tcp_select_window,
+	.select_initial_window		= tcp_select_initial_window,
+	.select_size			= select_size,
+	.init_buffer_space		= tcp_init_buffer_space,
+	.set_rto			= tcp_set_rto,
+	.should_expand_sndbuf		= tcp_should_expand_sndbuf,
+	.send_fin			= tcp_send_fin,
+	.write_xmit			= tcp_write_xmit,
+	.send_active_reset		= tcp_send_active_reset,
+	.write_wakeup			= tcp_write_wakeup,
+	.prune_ofo_queue		= tcp_prune_ofo_queue,
+	.retransmit_timer		= tcp_retransmit_timer,
+	.time_wait			= tcp_time_wait,
+	.cleanup_rbuf			= tcp_cleanup_rbuf,
+	.cwnd_validate			= tcp_cwnd_validate,
+};
+#endif
 /* Address-family independent initialization for a tcp_sock.
  *
  * NOTE: A lot of things set to zero explicitly by call to
@@ -389,7 +429,11 @@ void tcp_init_sock(struct sock *sk)
 
 	icsk->icsk_rto = TCP_TIMEOUT_INIT;
 	tp->mdev_us = jiffies_to_usecs(TCP_TIMEOUT_INIT);
+#ifdef CONFIG_TCP_CONG_BBR
+	minmax_reset(&tp->rtt_min, tcp_time_stamp, ~0U);
+#else
 	tp->rtt_min[0].rtt = ~0U;
+#endif
 
 	/* So many TCP implementations out there (incorrectly) count the
 	 * initial SYN frame in their delayed-ACK and congestion control
@@ -398,6 +442,11 @@ void tcp_init_sock(struct sock *sk)
 	 */
 	tp->snd_cwnd = TCP_INIT_CWND;
 
+#ifdef CONFIG_TCP_CONG_BBR
+	/* There's a bubble in the pipe until at least the first ACK. */
+	tp->app_limited = ~0U;
+#endif
+
 	/* See draft-stevens-tcpca-spec-01 for discussion of the
 	 * initialization of these values.
 	 */
@@ -405,6 +454,11 @@ void tcp_init_sock(struct sock *sk)
 	tp->snd_cwnd_clamp = ~0;
 	tp->mss_cache = TCP_MSS_DEFAULT;
 	u64_stats_init(&tp->syncp);
+
+#ifdef CONFIG_TCP_AUTOTUNING
+	tp->rcv_rtt_est.min_rtt = ~0U;
+	tp->rcv_rate.rcv_wnd = ~0U;
+#endif
 
 	tp->reordering = sysctl_tcp_reordering;
 	tcp_enable_early_retrans(tp);
@@ -421,7 +475,12 @@ void tcp_init_sock(struct sock *sk)
 
 	sk->sk_sndbuf = sysctl_tcp_wmem[1];
 	sk->sk_rcvbuf = sysctl_tcp_rmem[1];
+#ifdef CONFIG_MPTCP
+	tp->ops = &tcp_specific;
 
+	/* Initialize MPTCP-specific stuff and function-pointers */
+	mptcp_init_tcp_sock(sk);
+#endif
 	local_bh_disable();
 	sock_update_memcg(sk);
 	sk_sockets_allocated_inc(sk);
@@ -744,6 +803,15 @@ ssize_t tcp_splice_read(struct socket *sock, loff_t *ppos,
 	int ret;
 
 	sock_rps_record_flow(sk);
+
+#ifdef CONFIG_MPTCP
+	if (mptcp(tcp_sk(sk))) {
+		struct sock *sk_it;
+
+		mptcp_for_each_sk(tcp_sk(sk)->mpcb, sk_it)
+			sock_rps_record_flow(sk_it);
+	}
+#endif
 	/*
 	 * We can't seek on a socket input
 	 */
@@ -857,8 +925,10 @@ struct sk_buff *sk_stream_alloc_skb(struct sock *sk, int size, gfp_t gfp,
 	return NULL;
 }
 
-static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
-				       int large_allowed)
+#ifndef CONFIG_MPTCP
+static
+#endif
+unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now, int large_allowed)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 new_size_goal, size_goal;
@@ -886,6 +956,13 @@ static int tcp_send_mss(struct sock *sk, int *size_goal, int flags)
 {
 	int mss_now;
 
+#ifdef CONFIG_MPTCP
+	if (mptcp(tcp_sk(sk))) {
+		mss_now = mptcp_current_mss(sk);
+		*size_goal = mptcp_xmit_size_goal(sk, mss_now, !(flags & MSG_OOB));
+		return mss_now;
+	}
+#endif
 	mss_now = tcp_current_mss(sk);
 	*size_goal = tcp_xmit_size_goal(sk, mss_now, !(flags & MSG_OOB));
 
@@ -906,12 +983,37 @@ static ssize_t do_tcp_sendpages(struct sock *sk, struct page *page, int offset,
 	 * is fully established.
 	 */
 	if (((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT)) &&
+#ifdef CONFIG_MPTCP
+	    !tcp_passive_fastopen(mptcp(tp) && tp->mpcb->master_sk ?
+				  tp->mpcb->master_sk : sk)) {
+#else
 	    !tcp_passive_fastopen(sk)) {
+#endif
 		err = sk_stream_wait_connect(sk, &timeo);
 		if (err != 0)
 			goto out_err;
 	}
+#ifdef CONFIG_MPTCP
+	if (mptcp(tp)) {
+		struct sock *sk_it = sk;
 
+		/* We must check this with socket-lock hold because we iterate
+		 * over the subflows.
+		 */
+		if (!mptcp_can_sendpage(sk)) {
+			ssize_t ret;
+
+			release_sock(sk);
+			ret = sock_no_sendpage(sk->sk_socket, page, offset,
+					       size, flags);
+			lock_sock(sk);
+			return ret;
+		}
+
+		mptcp_for_each_sk(tp->mpcb, sk_it)
+			sock_rps_record_flow(sk_it);
+	}
+#endif
 	sk_clear_bit(SOCKWQ_ASYNC_NOSPACE, sk);
 
 	mss_now = tcp_send_mss(sk, &size_goal, flags);
@@ -1024,19 +1126,33 @@ int tcp_sendpage(struct sock *sk, struct page *page, int offset,
 {
 	ssize_t res;
 
+#ifdef CONFIG_MPTCP
+	/* If MPTCP is enabled, we check it later after establishment */
+	if (!mptcp(tcp_sk(sk)) && (!(sk->sk_route_caps & NETIF_F_SG) ||
+				   !(sk->sk_route_caps & NETIF_F_ALL_CSUM)))
+#else
 	if (!(sk->sk_route_caps & NETIF_F_SG) ||
 	    !(sk->sk_route_caps & NETIF_F_ALL_CSUM))
+#endif
 		return sock_no_sendpage(sk->sk_socket, page, offset, size,
 					flags);
 
 	lock_sock(sk);
+
+#ifdef CONFIG_TCP_CONG_BBR
+	tcp_rate_check_app_limited(sk);  /* is sending application-limited? */
+#endif
+
 	res = do_tcp_sendpages(sk, page, offset, size, flags);
 	release_sock(sk);
 	return res;
 }
 EXPORT_SYMBOL(tcp_sendpage);
 
-static inline int select_size(const struct sock *sk, bool sg)
+#ifndef CONFIG_MPTCP
+static inline
+#endif
+int select_size(const struct sock *sk, bool sg)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	int tmp = tp->mss_cache;
@@ -1104,6 +1220,16 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	int mss_now = 0, size_goal, copied_syn = 0;
 	bool sg;
 	long timeo;
+	#if defined(CONFIG_PPPOLAC) || defined(CONFIG_PPPOPNS)
+	#ifdef CONFIG_HUAWEI_XENGINE
+	bool bAccelerate = false;
+	#endif
+	#endif
+
+#ifdef CONFIG_HW_NETWORK_AWARE
+	tcp_network_aware(false);
+	stat_bg_network_flow(false, size);
+#endif
 
 	lock_sock(sk);
 
@@ -1118,17 +1244,33 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 
 	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
+#ifdef CONFIG_TCP_CONG_BBR
+	tcp_rate_check_app_limited(sk);  /* is sending application-limited? */
+#endif
+
 	/* Wait for a connection to finish. One exception is TCP Fast Open
 	 * (passive side) where data is allowed to be sent before a connection
 	 * is fully established.
 	 */
 	if (((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT)) &&
+#ifdef CONFIG_MPTCP
+	    !tcp_passive_fastopen(mptcp(tp) && tp->mpcb->master_sk ?
+				  tp->mpcb->master_sk : sk)) {
+#else
 	    !tcp_passive_fastopen(sk)) {
+#endif
 		err = sk_stream_wait_connect(sk, &timeo);
 		if (err != 0)
 			goto do_error;
 	}
+#ifdef CONFIG_MPTCP
+	if (mptcp(tp)) {
+		struct sock *sk_it = sk;
 
+		mptcp_for_each_sk(tp->mpcb, sk_it)
+			sock_rps_record_flow(sk_it);
+	}
+#endif
 	if (unlikely(tp->repair)) {
 		if (tp->repair_queue == TCP_RECV_QUEUE) {
 			copied = tcp_send_rcvq(sk, msg, size);
@@ -1141,7 +1283,31 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 
 		/* 'common' sending to sendq */
 	}
+#if defined(CONFIG_PPPOLAC) || defined(CONFIG_PPPOPNS)
+#ifdef CONFIG_HUAWEI_XENGINE
+#ifdef CONFIG_HUAWEI_BASTET
+	bAccelerate = BST_FG_Hook_Ul_Stub(sk, msg);
+#endif
 
+	if( !bAccelerate )
+	{
+		bAccelerate = Emcom_Xengine_Hook_Ul_Stub( sk );
+	}
+
+	if( bAccelerate )
+	{
+		EMCOM_XENGINE_SetAccState(sk, EMCOM_XENGINE_ACC_HIGH);
+	}
+	else
+	{
+		EMCOM_XENGINE_SetAccState(sk, EMCOM_XENGINE_ACC_NORMAL);
+	}
+#else
+#ifdef CONFIG_HUAWEI_BASTET
+	BST_FG_Hook_Ul_Stub(sk, msg);
+#endif
+#endif
+#endif
 	/* This should be in poll */
 	sk_clear_bit(SOCKWQ_ASYNC_NOSPACE, sk);
 
@@ -1153,8 +1319,12 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	err = -EPIPE;
 	if (sk->sk_err || (sk->sk_shutdown & SEND_SHUTDOWN))
 		goto out_err;
-
-	sg = !!(sk->sk_route_caps & NETIF_F_SG);
+#ifdef CONFIG_MPTCP
+	if (mptcp(tp))
+		sg = mptcp_can_sg(sk);
+	else
+#endif
+		sg = !!(sk->sk_route_caps & NETIF_F_SG);
 
 	while (msg_data_left(msg)) {
 		int copy = 0;
@@ -1176,7 +1346,11 @@ new_segment:
 				goto wait_for_sndbuf;
 
 			skb = sk_stream_alloc_skb(sk,
+#ifdef CONFIG_MPTCP
+						  tp->ops->select_size(sk, sg),
+#else
 						  select_size(sk, sg),
+#endif
 						  sk->sk_allocation,
 						  skb_queue_empty(&sk->sk_write_queue));
 			if (!skb)
@@ -1185,7 +1359,18 @@ new_segment:
 			/*
 			 * Check whether we can use HW checksum.
 			 */
+#ifdef CONFIG_MPTCP
+			 /* If dss-csum is enabled, we do not do hw-csum.
+			 * In case of non-mptcp we check the
+			 * device-capabilities.
+			 * In case of mptcp, hw-csum's will be handled
+			 * later in mptcp_write_xmit.
+			 */
+			if (((mptcp(tp) && !tp->mpcb->dss_csum) || !mptcp(tp)) &&
+			    (mptcp(tp) || sk->sk_route_caps & NETIF_F_ALL_CSUM))
+#else
 			if (sk->sk_route_caps & NETIF_F_ALL_CSUM)
+#endif
 				skb->ip_summed = CHECKSUM_PARTIAL;
 
 			skb_entail(sk, skb);
@@ -1391,7 +1576,10 @@ static int tcp_peek_sndq(struct sock *sk, struct msghdr *msg, int len)
  * calculation of whether or not we must ACK for the sake of
  * a window update.
  */
-static void tcp_cleanup_rbuf(struct sock *sk, int copied)
+#ifndef CONFIG_MPTCP
+static
+#endif
+void tcp_cleanup_rbuf(struct sock *sk, int copied)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	bool time_to_ack = false;
@@ -1434,8 +1622,11 @@ static void tcp_cleanup_rbuf(struct sock *sk, int copied)
 
 		/* Optimize, __tcp_select_window() is not cheap. */
 		if (2*rcv_window_now <= tp->window_clamp) {
+#ifdef CONFIG_MPTCP
+			__u32 new_window = tp->ops->__select_window(sk);
+#else
 			__u32 new_window = __tcp_select_window(sk);
-
+#endif
 			/* Send ACK now, if this read freed lots of space
 			 * in our buffer. Certainly, new_window is new window.
 			 * We can advertise it now, if it is not less than current one.
@@ -1445,8 +1636,13 @@ static void tcp_cleanup_rbuf(struct sock *sk, int copied)
 				time_to_ack = true;
 		}
 	}
+#ifdef CONFIG_TCP_ARGO
+	if (time_to_ack && tcp_argo_send_ack_immediatly(tp))
+		tcp_send_ack(sk);
+#else
 	if (time_to_ack)
 		tcp_send_ack(sk);
+#endif /* CONFIG_TCP_ARGO */
 }
 
 static void tcp_prequeue_process(struct sock *sk)
@@ -1566,7 +1762,11 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
 	/* Clean up data we have read: This will do ACK frames. */
 	if (copied > 0) {
 		tcp_recv_skb(sk, seq, &offset);
+#ifdef CONFIG_MPTCP
+		tp->ops->cleanup_rbuf(sk, copied);
+#else
 		tcp_cleanup_rbuf(sk, copied);
+#endif
 	}
 	return copied;
 }
@@ -1598,11 +1798,25 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 	if (unlikely(flags & MSG_ERRQUEUE))
 		return inet_recv_error(sk, msg, len, addr_len);
 
+
+#ifdef CONFIG_HW_NETWORK_AWARE
+	tcp_network_aware(true);
+#endif
+
 	if (sk_can_busy_loop(sk) && skb_queue_empty(&sk->sk_receive_queue) &&
 	    (sk->sk_state == TCP_ESTABLISHED))
 		sk_busy_loop(sk, nonblock);
 
 	lock_sock(sk);
+
+#ifdef CONFIG_MPTCP
+	if (mptcp(tp)) {
+		struct sock *sk_it;
+
+		mptcp_for_each_sk(tp->mpcb, sk_it)
+			sock_rps_record_flow(sk_it);
+	}
+#endif
 
 	err = -ENOTCONN;
 	if (sk->sk_state == TCP_LISTEN)
@@ -1721,9 +1935,11 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 				break;
 			}
 		}
-
+#ifdef CONFIG_MPTCP
+		tp->ops->cleanup_rbuf(sk, copied);
+#else
 		tcp_cleanup_rbuf(sk, copied);
-
+#endif
 		if (!sysctl_tcp_low_latency && tp->ucopy.task == user_recv) {
 			/* Install new reader */
 			if (!user_recv && !(flags & (MSG_TRUNC | MSG_PEEK))) {
@@ -1897,8 +2113,14 @@ skip_copy:
 	 */
 
 	/* Clean up data we have read: This will do ACK frames. */
+#ifdef CONFIG_MPTCP
+	tp->ops->cleanup_rbuf(sk, copied);
+#else
 	tcp_cleanup_rbuf(sk, copied);
-
+#endif
+#ifdef CONFIG_HW_NETWORK_AWARE
+	stat_bg_network_flow(true, copied);
+#endif
 	release_sock(sk);
 	return copied;
 
@@ -1919,6 +2141,15 @@ EXPORT_SYMBOL(tcp_recvmsg);
 void tcp_set_state(struct sock *sk, int state)
 {
 	int oldstate = sk->sk_state;
+#ifdef CONFIG_HW_WIFIPRO
+	struct inet_sock *inet_temp = inet_sk(sk);
+	unsigned int dest_addr = 0;
+	unsigned int dest_port = 0;
+	if (NULL != inet_temp) {
+		dest_addr = htonl(inet_temp->inet_daddr);
+		dest_port = htons(inet_temp->inet_dport);
+	}
+#endif
 
 	switch (state) {
 	case TCP_ESTABLISHED:
@@ -1930,6 +2161,7 @@ void tcp_set_state(struct sock *sk, int state)
 		if (oldstate == TCP_CLOSE_WAIT || oldstate == TCP_ESTABLISHED)
 			TCP_INC_STATS(sock_net(sk), TCP_MIB_ESTABRESETS);
 
+
 		sk->sk_prot->unhash(sk);
 		if (inet_csk(sk)->icsk_bind_hash &&
 		    !(sk->sk_userlocks & SOCK_BINDPORT_LOCK))
@@ -1940,10 +2172,24 @@ void tcp_set_state(struct sock *sk, int state)
 			TCP_DEC_STATS(sock_net(sk), TCP_MIB_CURRESTAB);
 	}
 
+#ifdef CONFIG_HUAWEI_BASTET
+	bastet_check_partner(sk, state);
+	BST_FG_CheckSockUid(sk, state);
+#endif
 	/* Change state AFTER socket is unhashed to avoid closed
 	 * socket sitting in hash tables.
 	 */
 	sk_state_store(sk, state);
+#ifdef CONFIG_HW_WIFIPRO
+	if (state == TCP_SYN_SENT) {
+		if (is_wifipro_on && is_mcc_china && wifipro_is_not_local_or_lan_sock(dest_addr)) {
+			if (wifipro_is_google_sock(current, dest_addr)) {
+				sk->wifipro_is_google_sock = 1;
+				WIFIPRO_DEBUG("add a google sock:%s", wifipro_ntoa(dest_addr));
+			}
+		}
+	}
+#endif
 
 #ifdef STATE_TRACE
 	SOCK_DEBUG(sk, "TCP sk=%p, State %s -> %s\n", sk, statename[oldstate], statename[state]);
@@ -1975,7 +2221,10 @@ static const unsigned char new_state[16] = {
   [TCP_NEW_SYN_RECV]	= TCP_CLOSE,	/* should not happen ! */
 };
 
-static int tcp_close_state(struct sock *sk)
+#ifndef CONFIG_MPTCP
+static
+#endif
+int tcp_close_state(struct sock *sk)
 {
 	int next = (int)new_state[sk->sk_state];
 	int ns = next & TCP_STATE_MASK;
@@ -2005,7 +2254,11 @@ void tcp_shutdown(struct sock *sk, int how)
 	     TCPF_SYN_RECV | TCPF_CLOSE_WAIT)) {
 		/* Clear out any half completed packets.  FIN if needed. */
 		if (tcp_close_state(sk))
+#ifdef CONFIG_MPTCP
+			tcp_sk(sk)->ops->send_fin(sk);
+#else
 			tcp_send_fin(sk);
+#endif
 	}
 }
 EXPORT_SYMBOL(tcp_shutdown);
@@ -2030,6 +2283,12 @@ void tcp_close(struct sock *sk, long timeout)
 	int data_was_unread = 0;
 	int state;
 
+#ifdef CONFIG_MPTCP
+	if (is_meta_sk(sk)) {
+		mptcp_close(sk, timeout);
+		return;
+	}
+#endif
 	lock_sock(sk);
 	sk->sk_shutdown = SHUTDOWN_MASK;
 
@@ -2074,7 +2333,11 @@ void tcp_close(struct sock *sk, long timeout)
 		/* Unread data was tossed, zap the connection. */
 		NET_INC_STATS_USER(sock_net(sk), LINUX_MIB_TCPABORTONCLOSE);
 		tcp_set_state(sk, TCP_CLOSE);
+#ifdef CONFIG_MPTCP
+		tcp_sk(sk)->ops->send_active_reset(sk, sk->sk_allocation);
+#else
 		tcp_send_active_reset(sk, sk->sk_allocation);
+#endif
 	} else if (sock_flag(sk, SOCK_LINGER) && !sk->sk_lingertime) {
 		/* Check zero linger _after_ checking for unread data. */
 		sk->sk_prot->disconnect(sk, 0);
@@ -2154,7 +2417,11 @@ adjudge_to_death:
 		struct tcp_sock *tp = tcp_sk(sk);
 		if (tp->linger2 < 0) {
 			tcp_set_state(sk, TCP_CLOSE);
+#ifdef CONFIG_MPTCP
+			tp->ops->send_active_reset(sk, GFP_ATOMIC);
+#else
 			tcp_send_active_reset(sk, GFP_ATOMIC);
+#endif
 			NET_INC_STATS_BH(sock_net(sk),
 					LINUX_MIB_TCPABORTONLINGER);
 		} else {
@@ -2164,7 +2431,12 @@ adjudge_to_death:
 				inet_csk_reset_keepalive_timer(sk,
 						tmo - TCP_TIMEWAIT_LEN);
 			} else {
+#ifdef CONFIG_MPTCP
+				tcp_sk(sk)->ops->time_wait(sk, TCP_FIN_WAIT2,
+							   tmo);
+#else
 				tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
+#endif
 				goto out;
 			}
 		}
@@ -2173,7 +2445,11 @@ adjudge_to_death:
 		sk_mem_reclaim(sk);
 		if (tcp_check_oom(sk, 0)) {
 			tcp_set_state(sk, TCP_CLOSE);
+#ifdef CONFIG_MPTCP
+			tcp_sk(sk)->ops->send_active_reset(sk, GFP_ATOMIC);
+#else
 			tcp_send_active_reset(sk, GFP_ATOMIC);
+#endif
 			NET_INC_STATS_BH(sock_net(sk),
 					LINUX_MIB_TCPABORTONMEMORY);
 		}
@@ -2198,6 +2474,7 @@ out:
 }
 EXPORT_SYMBOL(tcp_close);
 
+#ifndef CONFIG_MPTCP
 /* These states need RST on ABORT according to RFC793 */
 
 static inline bool tcp_need_reset(int state)
@@ -2206,6 +2483,7 @@ static inline bool tcp_need_reset(int state)
 	       (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT | TCPF_FIN_WAIT1 |
 		TCPF_FIN_WAIT2 | TCPF_SYN_RECV);
 }
+#endif
 
 int tcp_disconnect(struct sock *sk, int flags)
 {
@@ -2229,7 +2507,11 @@ int tcp_disconnect(struct sock *sk, int flags)
 		/* The last check adjusts for discrepancy of Linux wrt. RFC
 		 * states
 		 */
+#ifdef CONFIG_MPTCP
+		tp->ops->send_active_reset(sk, gfp_any());
+#else
 		tcp_send_active_reset(sk, gfp_any());
+#endif
 		sk->sk_err = ECONNRESET;
 	} else if (old_state == TCP_SYN_SENT)
 		sk->sk_err = ECONNRESET;
@@ -2243,6 +2525,15 @@ int tcp_disconnect(struct sock *sk, int flags)
 
 	if (!(sk->sk_userlocks & SOCK_BINDADDR_LOCK))
 		inet_reset_saddr(sk);
+
+#ifdef CONFIG_MPTCP
+	if (is_meta_sk(sk)) {
+		mptcp_disconnect(sk);
+	} else {
+		if (tp->inside_tk_table)
+			mptcp_hash_remove_bh(tp);
+	}
+#endif
 
 	sk->sk_shutdown = 0;
 	sock_reset_flag(sk, SOCK_DONE);
@@ -2363,6 +2654,61 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		release_sock(sk);
 		return err;
 	}
+#ifdef CONFIG_MPTCP
+	case MPTCP_SCHEDULER: {
+		char name[MPTCP_SCHED_NAME_MAX];
+
+		if (optlen < 1)
+			return -EINVAL;
+
+		/* Cannot be used if MPTCP is not used or we already have
+		 * established an MPTCP-connection.
+		 */
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    sk->sk_state != TCP_CLOSE)
+			return -EPERM;
+
+		val = strncpy_from_user(name, optval,
+					min_t(long, MPTCP_SCHED_NAME_MAX - 1,
+					      optlen));
+
+		if (val < 0)
+			return -EFAULT;
+		name[val] = 0;
+
+		lock_sock(sk);
+		err = mptcp_set_scheduler(sk, name);
+		release_sock(sk);
+		return err;
+	}
+
+	case MPTCP_PATH_MANAGER: {
+		char name[MPTCP_PM_NAME_MAX];
+
+		if (optlen < 1)
+			return -EINVAL;
+
+		/* Cannot be used if MPTCP is not used or we already have
+		 * established an MPTCP-connection.
+		 */
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    sk->sk_state != TCP_CLOSE)
+			return -EPERM;
+
+		val = strncpy_from_user(name, optval,
+					min_t(long, MPTCP_PM_NAME_MAX - 1,
+					      optlen));
+
+		if (val < 0)
+			return -EFAULT;
+		name[val] = 0;
+
+		lock_sock(sk);
+		err = mptcp_set_path_manager(sk, name);
+		release_sock(sk);
+		return err;
+	}
+#endif
 	default:
 		/* fallthru */
 		break;
@@ -2426,10 +2772,19 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		if (!tcp_can_repair_sock(sk))
 			err = -EPERM;
 		else if (val == 1) {
+#ifdef CONFIG_HUAWEI_BASTET
+			if (bastet_sock_repair_prepare_notify(sk, val)) {
+				err = -EPERM;
+				break;
+			}
+#endif
 			tp->repair = 1;
 			sk->sk_reuse = SK_FORCE_REUSE;
 			tp->repair_queue = TCP_NO_QUEUE;
 		} else if (val == 0) {
+#ifdef CONFIG_HUAWEI_BASTET
+			bastet_sock_repair_prepare_notify(sk, val);
+#endif
 			tp->repair = 0;
 			sk->sk_reuse = SK_NO_REUSE;
 			tcp_send_window_probe(sk);
@@ -2544,6 +2899,14 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		break;
 
 	case TCP_DEFER_ACCEPT:
+#ifdef CONFIG_MPTCP
+		/* An established MPTCP-connection (mptcp(tp) only returns true
+		 * if the socket is established) should not use DEFER on new
+		 * subflows.
+		 */
+		if (mptcp(tp))
+			break;
+#endif
 		/* Translate value in seconds to number of retransmits */
 		icsk->icsk_accept_queue.rskq_defer_accept =
 			secs_to_retrans(val, TCP_TIMEOUT_INIT / HZ,
@@ -2571,7 +2934,11 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 			    (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT) &&
 			    inet_csk_ack_scheduled(sk)) {
 				icsk->icsk_ack.pending |= ICSK_ACK_PUSHED;
+#ifdef CONFIG_MPTCP
+				tp->ops->cleanup_rbuf(sk, 1);
+#else
 				tcp_cleanup_rbuf(sk, 1);
+#endif
 				if (!(val & 1))
 					icsk->icsk_ack.pingpong = 1;
 			}
@@ -2614,6 +2981,33 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		tp->notsent_lowat = val;
 		sk->sk_write_space(sk);
 		break;
+#ifdef CONFIG_HUAWEI_BASTET
+	case TCP_RECONN:
+		bastet_reconn_config(sk, val);
+		break;
+#endif
+#ifdef CONFIG_MPTCP
+	case MPTCP_ENABLED:
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    sk->sk_state != TCP_CLOSE) {
+			err = -EPERM;
+			break;
+		}
+
+		if (val)
+			mptcp_enable_sock(sk);
+		else
+			mptcp_disable_sock(sk);
+		break;
+	case MPTCP_INFO:
+		if (mptcp_init_failed || !sysctl_mptcp_enabled) {
+			err = -EPERM;
+			break;
+		}
+
+		tp->record_master_info = !!(val & MPTCP_INFO_FLAG_SAVE_MASTER);
+		break;
+#endif
 	default:
 		err = -ENOPROTOOPT;
 		break;
@@ -2652,6 +3046,9 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
 {
 	const struct tcp_sock *tp = tcp_sk(sk); /* iff sk_type == SOCK_STREAM */
 	const struct inet_connection_sock *icsk = inet_csk(sk);
+#ifdef CONFIG_TCP_CONG_BBR
+	u32 intv;
+#endif
 	u32 now = tcp_time_stamp;
 	unsigned int start;
 	u64 rate64;
@@ -2734,6 +3131,17 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
 	} while (u64_stats_fetch_retry_irq(&tp->syncp, start));
 	info->tcpi_segs_out = tp->segs_out;
 	info->tcpi_segs_in = tp->segs_in;
+
+#ifdef CONFIG_TCP_CONG_BBR
+	info->tcpi_delivery_rate_app_limited = tp->rate_app_limited ? 1 : 0;
+	rate = READ_ONCE(tp->rate_delivered);
+	intv = READ_ONCE(tp->rate_interval_us);
+	if (rate && intv) {
+		rate64 = (u64)rate * tp->mss_cache * USEC_PER_SEC;
+		do_div(rate64, intv);
+		put_unaligned(rate64, &info->tcpi_delivery_rate);
+	}
+#endif
 }
 EXPORT_SYMBOL_GPL(tcp_get_info);
 
@@ -2916,6 +3324,78 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
 		}
 		return 0;
 	}
+#ifdef CONFIG_MPTCP
+	case MPTCP_SCHEDULER:
+		if (get_user(len, optlen))
+			return -EFAULT;
+		len = min_t(unsigned int, len, MPTCP_SCHED_NAME_MAX);
+		if (put_user(len, optlen))
+			return -EFAULT;
+
+		if (mptcp(tcp_sk(sk))) {
+			struct mptcp_cb *mpcb = tcp_sk(mptcp_meta_sk(sk))->mpcb;
+
+			if (copy_to_user(optval, mpcb->sched_ops->name, len))
+				return -EFAULT;
+		} else {
+			if (copy_to_user(optval, tcp_sk(sk)->mptcp_sched_name,
+					 len))
+				return -EFAULT;
+		}
+		return 0;
+
+	case MPTCP_PATH_MANAGER:
+		if (get_user(len, optlen))
+			return -EFAULT;
+		len = min_t(unsigned int, len, MPTCP_PM_NAME_MAX);
+		if (put_user(len, optlen))
+			return -EFAULT;
+
+		if (mptcp(tcp_sk(sk))) {
+			struct mptcp_cb *mpcb = tcp_sk(mptcp_meta_sk(sk))->mpcb;
+
+			if (copy_to_user(optval, mpcb->pm_ops->name, len))
+				return -EFAULT;
+		} else {
+			if (copy_to_user(optval, tcp_sk(sk)->mptcp_pm_name,
+					 len))
+				return -EFAULT;
+		}
+		return 0;
+
+	case MPTCP_ENABLED:
+		if (sk->sk_state != TCP_SYN_SENT)
+			val = mptcp(tp) ? 1 : 0;
+		else
+			val = sock_flag(sk, SOCK_MPTCP) ? 1 : 0;
+		break;
+	case MPTCP_INFO:
+	{
+		int ret;
+
+		if (!mptcp(tp))
+			return -EINVAL;
+
+		if (get_user(len, optlen))
+			return -EFAULT;
+
+		if (len < sizeof(struct mptcp_info))
+			return -EINVAL;
+		else
+			len = sizeof(struct mptcp_info);
+
+		lock_sock(sk);
+		ret = mptcp_get_info(sk, optval, len);
+		release_sock(sk);
+
+		if (ret)
+			return ret;
+
+		if (put_user(len, optlen))
+			return -EFAULT;
+		return 0;
+	}
+#endif
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -3085,7 +3565,9 @@ void tcp_done(struct sock *sk)
 
 	if (sk->sk_state == TCP_SYN_SENT || sk->sk_state == TCP_SYN_RECV)
 		TCP_INC_STATS_BH(sock_net(sk), TCP_MIB_ATTEMPTFAILS);
-
+#ifdef CONFIG_MPTCP
+	WARN_ON(sk->sk_state == TCP_CLOSE);
+#endif
 	tcp_set_state(sk, TCP_CLOSE);
 	tcp_clear_xmit_timers(sk);
 	if (req)
@@ -3176,11 +3658,16 @@ static void __init tcp_init_mem(void)
 
 void __init tcp_init(void)
 {
-	unsigned long limit;
 	int max_rshare, max_wshare, cnt;
+	unsigned long limit;
 	unsigned int i;
 
+#ifdef CONFIG_TCP_CONG_BBR
+	BUILD_BUG_ON(sizeof(struct tcp_skb_cb) >
+		     FIELD_SIZEOF(struct sk_buff, cb));
+#else
 	sock_skb_cb_check_size(sizeof(struct tcp_skb_cb));
+#endif
 
 	percpu_counter_init(&tcp_sockets_allocated, 0, GFP_KERNEL);
 	percpu_counter_init(&tcp_orphan_count, 0, GFP_KERNEL);
@@ -3233,6 +3720,9 @@ void __init tcp_init(void)
 	sysctl_max_syn_backlog = max(128, cnt / 256);
 
 	tcp_init_mem();
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	aspen_init_hashtable();
+#endif
 	/* Set per-socket limits to no more than 1/128 the pressure threshold */
 	limit = nr_free_buffer_pages() << (PAGE_SHIFT - 7);
 	max_wshare = min(4UL*1024*1024, limit);

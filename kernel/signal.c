@@ -45,6 +45,19 @@
 #include <asm/cacheflush.h>
 #include "audit.h"	/* audit_signal_info() */
 
+#ifdef CONFIG_HUAWEI_KSTATE
+#include <huawei_platform/power/hw_kcollect.h>
+#endif
+
+#ifdef CONFIG_BOOST_KILL
+extern void hisi_get_fast_cpus(struct cpumask *cpumask);
+
+/* Add apportunity to config enable/disable boost
+ * killing action
+ */
+unsigned int sysctl_boost_killing;
+#endif
+
 /*
  * SLAB caches for signal bits.
  */
@@ -346,7 +359,7 @@ static bool task_participate_group_stop(struct task_struct *task)
 	 * fresh group stop.  Read comment in do_signal_stop() for details.
 	 */
 	if (!sig->group_stop_count && !(sig->flags & SIGNAL_STOP_STOPPED)) {
-		signal_set_stop_flags(sig, SIGNAL_STOP_STOPPED);
+		sig->flags = SIGNAL_STOP_STOPPED;
 		return true;
 	}
 	return false;
@@ -845,7 +858,7 @@ static bool prepare_signal(int sig, struct task_struct *p, bool force)
 			 * will take ->siglock, notice SIGNAL_CLD_MASK, and
 			 * notify its parent. See get_signal_to_deliver().
 			 */
-			signal_set_stop_flags(signal, why | SIGNAL_STOP_CONTINUED);
+			signal->flags = why | SIGNAL_STOP_CONTINUED;
 			signal->group_stop_count = 0;
 			signal->group_exit_code = 0;
 		}
@@ -879,6 +892,11 @@ static void complete_signal(int sig, struct task_struct *p, int group)
 {
 	struct signal_struct *signal = p->signal;
 	struct task_struct *t;
+/*lint -save -e504*/
+#ifdef CONFIG_BOOST_KILL
+	cpumask_t new_mask = CPU_MASK_ALL;
+#endif
+/*lint -restore*/
 
 	/*
 	 * Now find a thread we can wake up to take the signal off the queue.
@@ -935,6 +953,15 @@ static void complete_signal(int sig, struct task_struct *p, int group)
 			signal->group_stop_count = 0;
 			t = p;
 			do {
+#ifdef CONFIG_BOOST_KILL
+				if (sysctl_boost_killing) {
+					if (can_nice(t, -20))
+						set_user_nice(t, -20);
+					hisi_get_fast_cpus(&new_mask);
+					cpumask_copy(&t->cpus_allowed, &new_mask);
+					t->nr_cpus_allowed = cpumask_weight(&new_mask);
+				}
+#endif
 				task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
 				sigaddset(&t->pending.signal, SIGKILL);
 				signal_wake_up(t, 1);
@@ -1144,8 +1171,23 @@ int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
 {
 	unsigned long flags;
 	int ret = -ESRCH;
-
+#ifdef CONFIG_HUAWEI_KSTATE
+	if (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT || sig == SIGQUIT)
+		hwkillinfo(p->tgid, sig);
+#endif
 	if (lock_task_sighand(p, &flags)) {
+#ifdef CONFIG_HW_DIE_CATCH
+		/*if the process have KILL_CATCH_FLAG, need to catch it in android platform*/
+		if (p->signal->unexpected_die_catch_flags & KILL_CATCH_FLAG) {
+			pr_warn("ExitCatch: %s(%d) send_sig %d to %s(%d)\n",
+				current->comm, current->pid, sig, p->comm, p->pid);
+			/*if current is init, don't consider it*/
+			if (current->pid != 1) {
+				sig = (sig == SIGKILL || sig == SIGTERM) ?
+					SIGABRT : sig;
+			}
+		}
+#endif
 		ret = send_signal(sig, info, p, group);
 		unlock_task_sighand(p, &flags);
 	}
@@ -3589,6 +3631,14 @@ void __init signals_init(void)
 {
 	sigqueue_cachep = KMEM_CACHE(sigqueue, SLAB_PANIC);
 }
+
+#ifdef CONFIG_HISI_SWAP_ZDATA
+int reclaim_sigusr_pending(struct task_struct *tsk)
+{
+	return	sigismember(&tsk->pending.signal, SIGUSR2) ||
+		sigismember(&tsk->signal->shared_pending.signal, SIGUSR2);
+}
+#endif
 
 #ifdef CONFIG_KGDB_KDB
 #include <linux/kdb.h>

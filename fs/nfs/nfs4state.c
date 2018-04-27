@@ -1072,7 +1072,6 @@ static void nfs_increment_seqid(int status, struct nfs_seqid *seqid)
 		case -NFS4ERR_BADXDR:
 		case -NFS4ERR_RESOURCE:
 		case -NFS4ERR_NOFILEHANDLE:
-		case -NFS4ERR_MOVED:
 			/* Non-seqid mutating errors */
 			return;
 	};

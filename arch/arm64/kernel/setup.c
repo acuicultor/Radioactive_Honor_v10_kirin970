@@ -31,7 +31,6 @@
 #include <linux/screen_info.h>
 #include <linux/init.h>
 #include <linux/kexec.h>
-#include <linux/crash_dump.h>
 #include <linux/root_dev.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
@@ -44,7 +43,6 @@
 #include <linux/of_platform.h>
 #include <linux/efi.h>
 #include <linux/psci.h>
-#include <linux/mm.h>
 
 #include <asm/acpi.h>
 #include <asm/fixmap.h>
@@ -202,10 +200,10 @@ static void __init request_standard_resources(void)
 	struct memblock_region *region;
 	struct resource *res;
 
-	kernel_code.start   = __pa_symbol(_text);
-	kernel_code.end     = __pa_symbol(__init_begin - 1);
-	kernel_data.start   = __pa_symbol(_sdata);
-	kernel_data.end     = __pa_symbol(_end - 1);
+	kernel_code.start   = virt_to_phys(_text);
+	kernel_code.end     = virt_to_phys(__init_begin - 1);
+	kernel_data.start   = virt_to_phys(_sdata);
+	kernel_data.end     = virt_to_phys(_end - 1);
 
 	for_each_memblock(memory, region) {
 		res = alloc_bootmem_low(sizeof(*res));
@@ -222,6 +220,12 @@ static void __init request_standard_resources(void)
 		if (kernel_data.start >= res->start &&
 		    kernel_data.end <= res->end)
 			request_resource(res, &kernel_data);
+#ifdef CONFIG_KEXEC_CORE
+		/* Userspace will find "Crash kernel" region in /proc/iomem. */
+		if (crashk_res.end && crashk_res.start >= res->start &&
+		    crashk_res.end <= res->end)
+			request_resource(res, &crashk_res);
+#endif
 	}
 }
 
@@ -350,7 +354,7 @@ void __init setup_arch(char **cmdline_p)
 
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
 	/*
-	 * Make sure thread_info.ttbr0 always generates translation
+	 * Make sure init_thread_info.ttbr0 always generates translation
 	 * faults in case uaccess_enable() is inadvertently called by the init
 	 * thread.
 	 */

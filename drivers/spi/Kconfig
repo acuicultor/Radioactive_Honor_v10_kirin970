@@ -315,7 +315,6 @@ config SPI_FSL_SPI
 config SPI_FSL_DSPI
 	tristate "Freescale DSPI controller"
 	select REGMAP_MMIO
-	depends on HAS_DMA
 	depends on SOC_VF610 || SOC_LS1021A || ARCH_LAYERSCAPE || COMPILE_TEST
 	help
 	  This enables support for the Freescale DSPI controller in master
@@ -689,6 +688,9 @@ config SPI_SPIDEV
 
 	  Note that this application programming interface is EXPERIMENTAL
 	  and hence SUBJECT TO CHANGE WITHOUT NOTICE while it stabilizes.
+
+config HISI_SPI
+	bool "Using HISI extra added code"
 
 config SPI_TLE62X0
 	tristate "Infineon TLE62X0 (for power switching)"

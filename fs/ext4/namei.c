@@ -1243,9 +1243,9 @@ static inline int ext4_match(struct ext4_filename *fname,
 	if (unlikely(!name)) {
 		if (fname->usr_fname->name[0] == '_') {
 			int ret;
-			if (de->name_len <= 32)
+			if (de->name_len < 16)
 				return 0;
-			ret = memcmp(de->name + ((de->name_len - 17) & ~15),
+			ret = memcmp(de->name + de->name_len - 16,
 				     fname->crypto_buf.name + 8, 16);
 			return (ret == 0) ? 1 : 0;
 		}
@@ -1403,6 +1403,10 @@ static struct buffer_head * ext4_find_entry (struct inode *dir,
 			       "falling back\n"));
 	}
 	nblocks = dir->i_size >> EXT4_BLOCK_SIZE_BITS(sb);
+	if (!nblocks) {
+		ret = NULL;
+		goto cleanup_and_exit;
+	}
 	start = EXT4_I(dir)->i_dir_start_lookup;
 	if (start >= nblocks)
 		start = 0;

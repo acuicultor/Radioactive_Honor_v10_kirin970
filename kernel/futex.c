@@ -681,7 +681,7 @@ static int get_futex_value_locked(u32 *dest, u32 __user *from)
 	int ret;
 
 	pagefault_disable();
-	ret = __copy_from_user_inatomic(dest, from, sizeof(u32));
+	ret = __get_user(*dest, from);
 	pagefault_enable();
 
 	return ret ? -EFAULT : 0;
@@ -1621,6 +1621,9 @@ static int futex_requeue(u32 __user *uaddr1, unsigned int flags,
 	struct futex_q *this, *next;
 	WAKE_Q(wake_q);
 
+	if (nr_wake < 0 || nr_requeue < 0)
+		return -EINVAL;
+
 	if (requeue_pi) {
 		/*
 		 * Requeue PI only works on two distinct uaddrs. This
@@ -1914,7 +1917,6 @@ static inline void queue_me(struct futex_q *q, struct futex_hash_bucket *hb)
 	 * the others are woken last, in FIFO order.
 	 */
 	prio = min(current->normal_prio, MAX_RT_PRIO);
-
 	plist_node_init(&q->list, prio);
 	plist_add(&q->list, &hb->chain);
 	q->task = current;
@@ -2284,7 +2286,6 @@ static int futex_wait(u32 __user *uaddr, unsigned int flags, u32 val,
 	struct futex_hash_bucket *hb;
 	struct futex_q q = futex_q_init;
 	int ret;
-
 	if (!bitset)
 		return -EINVAL;
 	q.bitset = bitset;
@@ -2308,7 +2309,6 @@ retry:
 	ret = futex_wait_setup(uaddr, val, flags, &q, &hb);
 	if (ret)
 		goto out;
-
 	/* queue_me and wait for wakeup, timeout, or a signal. */
 	futex_wait_queue_me(hb, &q, to);
 
@@ -3128,7 +3128,6 @@ SYSCALL_DEFINE6(futex, u32 __user *, uaddr, int, op, u32, val,
 	ktime_t t, *tp = NULL;
 	u32 val2 = 0;
 	int cmd = op & FUTEX_CMD_MASK;
-
 	if (utime && (cmd == FUTEX_WAIT || cmd == FUTEX_LOCK_PI ||
 		      cmd == FUTEX_WAIT_BITSET ||
 		      cmd == FUTEX_WAIT_REQUEUE_PI)) {

@@ -464,6 +464,7 @@ rescan:
 		}
 		return -EIO;
 	}
+	disk->queue->blk_part_tbl_exist = 1;
 	/*
 	 * If any partition code tried to read beyond EOD, try
 	 * unlocking native capacity even if partition table is

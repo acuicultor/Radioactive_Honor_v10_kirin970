@@ -18,6 +18,18 @@
 #include <linux/types.h>
 #include <trace/events/power.h>
 
+#ifdef CONFIG_HUAWEI_DUBAI
+#include <huawei_platform/log/hwlog_kernel.h>
+#endif
+
+#if (defined CONFIG_HUAWEI_SLEEPLOG) || (defined CONFIG_HUAWEI_DUBAI)
+#include <linux/proc_fs.h>
+#endif
+
+#ifdef CONFIG_HW_PTM
+#include <huawei_platform/power/hw_power_monitor.h>
+#endif
+
 #include "power.h"
 
 /*
@@ -60,8 +72,6 @@ static void pm_wakeup_timer_fn(unsigned long data);
 static LIST_HEAD(wakeup_sources);
 
 static DECLARE_WAIT_QUEUE_HEAD(wakeup_count_wait_queue);
-
-DEFINE_STATIC_SRCU(wakeup_srcu);
 
 static struct wakeup_source deleted_ws = {
 	.name = "deleted",
@@ -201,7 +211,7 @@ void wakeup_source_remove(struct wakeup_source *ws)
 	spin_lock_irqsave(&events_lock, flags);
 	list_del_rcu(&ws->entry);
 	spin_unlock_irqrestore(&events_lock, flags);
-	synchronize_srcu(&wakeup_srcu);
+	synchronize_rcu();
 }
 EXPORT_SYMBOL_GPL(wakeup_source_remove);
 
@@ -333,14 +343,13 @@ void device_wakeup_detach_irq(struct device *dev)
 void device_wakeup_arm_wake_irqs(void)
 {
 	struct wakeup_source *ws;
-	int srcuidx;
 
-	srcuidx = srcu_read_lock(&wakeup_srcu);
+	rcu_read_lock();
 	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
 		if (ws->wakeirq)
 			dev_pm_arm_wake_irq(ws->wakeirq);
 	}
-	srcu_read_unlock(&wakeup_srcu, srcuidx);
+	rcu_read_unlock();
 }
 
 /**
@@ -351,14 +360,13 @@ void device_wakeup_arm_wake_irqs(void)
 void device_wakeup_disarm_wake_irqs(void)
 {
 	struct wakeup_source *ws;
-	int srcuidx;
 
-	srcuidx = srcu_read_lock(&wakeup_srcu);
+	rcu_read_lock();
 	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
 		if (ws->wakeirq)
 			dev_pm_disarm_wake_irq(ws->wakeirq);
 	}
-	srcu_read_unlock(&wakeup_srcu, srcuidx);
+	rcu_read_unlock();
 }
 
 /**
@@ -843,10 +851,10 @@ EXPORT_SYMBOL_GPL(pm_get_active_wakeup_sources);
 void pm_print_active_wakeup_sources(void)
 {
 	struct wakeup_source *ws;
-	int srcuidx, active = 0;
+	int active = 0;
 	struct wakeup_source *last_activity_ws = NULL;
 
-	srcuidx = srcu_read_lock(&wakeup_srcu);
+	rcu_read_lock();
 	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
 		if (ws->active) {
 			pr_info("active wakeup source: %s\n", ws->name);
@@ -859,10 +867,18 @@ void pm_print_active_wakeup_sources(void)
 		}
 	}
 
-	if (!active && last_activity_ws)
+	if (!active && last_activity_ws){
 		pr_info("last active wakeup source: %s\n",
 			last_activity_ws->name);
-	srcu_read_unlock(&wakeup_srcu, srcuidx);
+#ifdef CONFIG_HUAWEI_DUBAI
+		HWDUBAI_LOGE("DUBAI_TAG_FREEZING_FAILED", "name=%s", last_activity_ws->name);
+#endif
+#ifdef CONFIG_HW_PTM
+        power_monitor_report(FREEZING_FAILED,"%s",
+            last_activity_ws->name);
+#endif
+    }
+	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(pm_print_active_wakeup_sources);
 
@@ -943,6 +959,9 @@ bool pm_get_wakeup_count(unsigned int *count, bool block)
 			split_counters(&cnt, &inpr);
 			if (inpr == 0 || signal_pending(current))
 				break;
+#ifdef CONFIG_HW_PTM
+			pm_print_active_wakeup_sources();
+#endif
 
 			schedule();
 		}
@@ -989,9 +1008,8 @@ void pm_wakep_autosleep_enabled(bool set)
 {
 	struct wakeup_source *ws;
 	ktime_t now = ktime_get();
-	int srcuidx;
 
-	srcuidx = srcu_read_lock(&wakeup_srcu);
+	rcu_read_lock();
 	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
 		spin_lock_irq(&ws->lock);
 		if (ws->autosleep_enabled != set) {
@@ -1005,7 +1023,7 @@ void pm_wakep_autosleep_enabled(bool set)
 		}
 		spin_unlock_irq(&ws->lock);
 	}
-	srcu_read_unlock(&wakeup_srcu, srcuidx);
+	rcu_read_unlock();
 }
 #endif /* CONFIG_PM_AUTOSLEEP */
 
@@ -1059,6 +1077,55 @@ static int print_wakeup_source_stats(struct seq_file *m,
 	return 0;
 }
 
+#ifdef CONFIG_HISI_SR
+/**
+ * print_active_wakeup_source - Print active wakeup source statistics information.
+ * @m: seq_file to print the statistics into.
+ * @ws: Wakeup source object to print the statistics for.
+ */
+static int print_active_wakeup_source(struct seq_file *m,
+				     struct wakeup_source *ws)
+{
+	unsigned long flags;
+	ktime_t total_time;
+	ktime_t max_time;
+	unsigned long active_count;
+	ktime_t active_time;
+	ktime_t prevent_sleep_time;
+
+	spin_lock_irqsave(&ws->lock, flags);
+
+	total_time = ws->total_time;
+	max_time = ws->max_time;
+	prevent_sleep_time = ws->prevent_sleep_time;
+	active_count = ws->active_count;
+	if (ws->active) {
+		ktime_t now = ktime_get();
+
+		active_time = ktime_sub(now, ws->last_time);
+		total_time = ktime_add(total_time, active_time);
+		if (active_time.tv64 > max_time.tv64)
+			max_time = active_time;
+
+		if (ws->autosleep_enabled)
+			prevent_sleep_time = ktime_add(prevent_sleep_time,
+				ktime_sub(now, ws->start_prevent_time));
+
+		seq_printf(m, "Active resource: %-12s\t%lu\t\t%lu\t\t%lu\t\t%lu\t\t"
+				"%lld\t\t%lld\t\t%lld\t\t%lld\t\t%lld\n",
+				ws->name, active_count, ws->event_count,
+				ws->wakeup_count, ws->expire_count,
+				ktime_to_ms(active_time), ktime_to_ms(total_time),
+				ktime_to_ms(max_time), ktime_to_ms(ws->last_time),
+				ktime_to_ms(prevent_sleep_time));
+	}
+
+	spin_unlock_irqrestore(&ws->lock, flags);
+
+	return 0;
+}
+#endif
+
 /**
  * wakeup_sources_stats_show - Print wakeup sources statistics information.
  * @m: seq_file to print the statistics into.
@@ -1066,16 +1133,19 @@ static int print_wakeup_source_stats(struct seq_file *m,
 static int wakeup_sources_stats_show(struct seq_file *m, void *unused)
 {
 	struct wakeup_source *ws;
-	int srcuidx;
 
 	seq_puts(m, "name\t\t\t\t\tactive_count\tevent_count\twakeup_count\t"
 		"expire_count\tactive_since\ttotal_time\tmax_time\t"
 		"last_change\tprevent_suspend_time\n");
 
-	srcuidx = srcu_read_lock(&wakeup_srcu);
+	rcu_read_lock();
 	list_for_each_entry_rcu(ws, &wakeup_sources, entry)
 		print_wakeup_source_stats(m, ws);
-	srcu_read_unlock(&wakeup_srcu, srcuidx);
+#ifdef CONFIG_HISI_SR
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry)
+		print_active_wakeup_source(m, ws);
+#endif
+	rcu_read_unlock();
 
 	print_wakeup_source_stats(m, &deleted_ws);
 
@@ -1103,3 +1173,15 @@ static int __init wakeup_sources_debugfs_init(void)
 }
 
 postcore_initcall(wakeup_sources_debugfs_init);
+
+#if (defined CONFIG_HUAWEI_SLEEPLOG) || (defined CONFIG_HUAWEI_DUBAI)
+static int __init wakeup_sources_proc_init(void)
+{
+	proc_create("wakeup_sources", S_IRUGO,
+			(struct proc_dir_entry *)NULL, &wakeup_sources_stats_fops);
+	return 0;
+}
+/*lint -e528 -esym(528,*)*/
+late_initcall(wakeup_sources_proc_init);
+/*lint -e528 +esym(528,*)*/
+#endif

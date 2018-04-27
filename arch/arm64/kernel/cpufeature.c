@@ -23,7 +23,6 @@
 #include <linux/sort.h>
 #include <linux/stop_machine.h>
 #include <linux/types.h>
-#include <linux/mm.h>
 #include <asm/cpu.h>
 #include <asm/cpufeature.h>
 #include <asm/cpu_ops.h>
@@ -106,7 +105,9 @@ static struct arm64_ftr_bits ftr_id_aa64mmfr0[] = {
 	ARM64_FTR_BITS(FTR_STRICT, FTR_EXACT, 32, 32, 0),
 	ARM64_FTR_BITS(FTR_STRICT, FTR_EXACT, ID_AA64MMFR0_TGRAN4_SHIFT, 4, ID_AA64MMFR0_TGRAN4_NI),
 	ARM64_FTR_BITS(FTR_STRICT, FTR_EXACT, ID_AA64MMFR0_TGRAN64_SHIFT, 4, ID_AA64MMFR0_TGRAN64_NI),
-	ARM64_FTR_BITS(FTR_STRICT, FTR_EXACT, ID_AA64MMFR0_TGRAN16_SHIFT, 4, ID_AA64MMFR0_TGRAN16_NI),
+	/* cortex-a53 not support 16KB memory translation granule size, but
+		artemis support 16KB memory translation granule size */
+	ARM64_FTR_BITS(FTR_NONSTRICT, FTR_EXACT, ID_AA64MMFR0_TGRAN16_SHIFT, 4, ID_AA64MMFR0_TGRAN16_NI),
 	ARM64_FTR_BITS(FTR_STRICT, FTR_EXACT, ID_AA64MMFR0_BIGENDEL0_SHIFT, 4, 0),
 	/* Linux shouldn't care about secure memory */
 	ARM64_FTR_BITS(FTR_NONSTRICT, FTR_EXACT, ID_AA64MMFR0_SNSMEM_SHIFT, 4, 0),
@@ -483,6 +484,7 @@ void update_cpu_features(int cpu,
 			 struct cpuinfo_arm64 *boot)
 {
 	int taint = 0;
+	unsigned int part_num = read_cpuid_part_number();
 
 	/*
 	 * The kernel can handle differing I-cache policies, but otherwise
@@ -530,8 +532,10 @@ void update_cpu_features(int cpu,
 	 */
 	taint |= check_update_ftr_reg(SYS_ID_AA64MMFR0_EL1, cpu,
 				      info->reg_id_aa64mmfr0, boot->reg_id_aa64mmfr0);
-	taint |= check_update_ftr_reg(SYS_ID_AA64MMFR1_EL1, cpu,
+	if (part_num != ARM_CPU_PART_ENYO) {
+		taint |= check_update_ftr_reg(SYS_ID_AA64MMFR1_EL1, cpu,
 				      info->reg_id_aa64mmfr1, boot->reg_id_aa64mmfr1);
+	}
 	taint |= check_update_ftr_reg(SYS_ID_AA64MMFR2_EL1, cpu,
 				      info->reg_id_aa64mmfr2, boot->reg_id_aa64mmfr2);
 
@@ -539,8 +543,10 @@ void update_cpu_features(int cpu,
 	 * EL3 is not our concern.
 	 * ID_AA64PFR1 is currently RES0.
 	 */
-	taint |= check_update_ftr_reg(SYS_ID_AA64PFR0_EL1, cpu,
+	if (part_num != ARM_CPU_PART_ENYO) {
+		taint |= check_update_ftr_reg(SYS_ID_AA64PFR0_EL1, cpu,
 				      info->reg_id_aa64pfr0, boot->reg_id_aa64pfr0);
+	}
 	taint |= check_update_ftr_reg(SYS_ID_AA64PFR1_EL1, cpu,
 				      info->reg_id_aa64pfr1, boot->reg_id_aa64pfr1);
 
@@ -558,8 +564,10 @@ void update_cpu_features(int cpu,
 					info->reg_id_isar2, boot->reg_id_isar2);
 	taint |= check_update_ftr_reg(SYS_ID_ISAR3_EL1, cpu,
 					info->reg_id_isar3, boot->reg_id_isar3);
-	taint |= check_update_ftr_reg(SYS_ID_ISAR4_EL1, cpu,
+	if (part_num != ARM_CPU_PART_ENYO) {
+		taint |= check_update_ftr_reg(SYS_ID_ISAR4_EL1, cpu,
 					info->reg_id_isar4, boot->reg_id_isar4);
+	}
 	taint |= check_update_ftr_reg(SYS_ID_ISAR5_EL1, cpu,
 					info->reg_id_isar5, boot->reg_id_isar5);
 
@@ -578,8 +586,10 @@ void update_cpu_features(int cpu,
 					info->reg_id_mmfr3, boot->reg_id_mmfr3);
 	taint |= check_update_ftr_reg(SYS_ID_PFR0_EL1, cpu,
 					info->reg_id_pfr0, boot->reg_id_pfr0);
-	taint |= check_update_ftr_reg(SYS_ID_PFR1_EL1, cpu,
+	if (part_num != ARM_CPU_PART_ENYO) {
+		taint |= check_update_ftr_reg(SYS_ID_PFR1_EL1, cpu,
 					info->reg_id_pfr1, boot->reg_id_pfr1);
+	}
 	taint |= check_update_ftr_reg(SYS_MVFR0_EL1, cpu,
 					info->reg_mvfr0, boot->reg_mvfr0);
 	taint |= check_update_ftr_reg(SYS_MVFR1_EL1, cpu,
@@ -650,6 +660,48 @@ static bool has_no_hw_prefetch(const struct arm64_cpu_capabilities *entry)
 	return MIDR_IS_CPU_MODEL_RANGE(midr, MIDR_THUNDERX, rv_min, rv_max);
 }
 
+#ifdef CONFIG_HISI_HHEE
+#include <linux/hisi/hisi_hkip.h>
+
+static bool has_hhee(const struct arm64_cpu_capabilities *entry)
+{
+	return hhee_is_present();
+}
+#endif
+
+#ifdef CONFIG_UNMAP_KERNEL_AT_EL0
+static int __kpti_forced; /* 0: not forced, >0: forced on, <0: forced off */
+
+static bool unmap_kernel_at_el0(const struct arm64_cpu_capabilities *entry)
+{
+	/* Forced on command line? */
+	if (__kpti_forced) {
+		pr_info_once("kernel page table isolation forced %s by command line option\n",
+			     __kpti_forced > 0 ? "ON" : "OFF");
+		return __kpti_forced > 0;
+	}
+
+	/* Useful for KASLR robustness */
+	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE))
+		return true;
+
+	return false;
+}
+
+static int __init parse_kpti(char *str)
+{
+	bool enabled;
+	int ret = strtobool(str, &enabled);
+
+	if (ret)
+		return ret;
+
+	__kpti_forced = enabled ? 1 : -1;
+	return 0;
+}
+__setup("kpti=", parse_kpti);
+#endif	/* CONFIG_UNMAP_KERNEL_AT_EL0 */
+
 static const struct arm64_cpu_capabilities arm64_features[] = {
 	{
 		.desc = "GIC system register CPU interface",
@@ -702,6 +754,19 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
 		.matches = cpufeature_pan_not_uao,
 	},
 #endif /* CONFIG_ARM64_PAN */
+#ifdef CONFIG_HISI_HHEE
+	{
+		.desc = "Huawei Hypervisor Execution Environment",
+		.capability = ARM64_HAS_HHEE,
+		.matches = has_hhee,
+	},
+#endif
+#ifdef CONFIG_UNMAP_KERNEL_AT_EL0
+	{
+		.capability = ARM64_UNMAP_KERNEL_AT_EL0,
+		.matches = unmap_kernel_at_el0,
+	},
+#endif
 	{},
 };
 
@@ -885,28 +950,6 @@ static u64 __raw_read_system_reg(u32 sys_id)
 }
 
 /*
- * Park the CPU which doesn't have the capability as advertised
- * by the system.
- */
-static void fail_incapable_cpu(char *cap_type,
-				 const struct arm64_cpu_capabilities *cap)
-{
-	int cpu = smp_processor_id();
-
-	pr_crit("CPU%d: missing %s : %s\n", cpu, cap_type, cap->desc);
-	/* Mark this CPU absent */
-	set_cpu_present(cpu, 0);
-
-	/* Check if we can park ourselves */
-	if (cpu_ops[cpu] && cpu_ops[cpu]->cpu_die)
-		cpu_ops[cpu]->cpu_die(cpu);
-	asm(
-	"1:	wfe\n"
-	"	wfi\n"
-	"	b	1b");
-}
-
-/*
  * Run through the enabled system capabilities and enable() it on this CPU.
  * The capabilities were decided based on the available CPUs at the boot time.
  * Any new CPU should match the system wide status of the capability. If the
@@ -918,6 +961,7 @@ void verify_local_cpu_capabilities(void)
 {
 	int i;
 	const struct arm64_cpu_capabilities *caps;
+	unsigned int part_num = read_cpuid_part_number();
 
 	/*
 	 * If we haven't computed the system capabilities, there is nothing
@@ -934,8 +978,11 @@ void verify_local_cpu_capabilities(void)
 		 * If the new CPU misses an advertised feature, we cannot proceed
 		 * further, park the cpu.
 		 */
-		if (!feature_matches(__raw_read_system_reg(caps[i].sys_reg), &caps[i]))
-			fail_incapable_cpu("arm64_features", &caps[i]);
+		if (!feature_matches(__raw_read_system_reg(caps[i].sys_reg), &caps[i])) {
+			pr_crit("CPU%d: missing feature: %s\n",
+					smp_processor_id(), caps[i].desc);
+			cpu_die_early();
+		}
 		if (caps[i].enable)
 			caps[i].enable(NULL);
 	}
@@ -943,8 +990,13 @@ void verify_local_cpu_capabilities(void)
 	for (i = 0, caps = arm64_hwcaps; caps[i].matches; i++) {
 		if (!cpus_have_hwcap(&caps[i]))
 			continue;
-		if (!feature_matches(__raw_read_system_reg(caps[i].sys_reg), &caps[i]))
-			fail_incapable_cpu("arm64_hwcaps", &caps[i]);
+		if ((part_num != ARM_CPU_PART_ENYO) || (caps[i].sys_reg != SYS_ID_ISAR5_EL1)) {
+			if (!feature_matches(__raw_read_system_reg(caps[i].sys_reg), &caps[i])) {
+			pr_crit("CPU%d: missing HWCAP: %s\n",
+					smp_processor_id(), caps[i].desc);
+			cpu_die_early();
+			}
+		}
 	}
 }
 

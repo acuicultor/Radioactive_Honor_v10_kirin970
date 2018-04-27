@@ -1353,7 +1353,6 @@ void tracing_reset_all_online_cpus(void)
 
 #define SAVED_CMDLINES_DEFAULT 128
 #define NO_CMDLINE_MAP UINT_MAX
-static unsigned saved_tgids[SAVED_CMDLINES_DEFAULT];
 static arch_spinlock_t trace_cmdline_lock = __ARCH_SPIN_LOCK_UNLOCKED;
 struct saved_cmdlines_buffer {
 	unsigned map_pid_to_cmdline[PID_MAX_DEFAULT+1];
@@ -1361,6 +1360,7 @@ struct saved_cmdlines_buffer {
 	unsigned cmdline_num;
 	int cmdline_idx;
 	char *saved_cmdlines;
+	unsigned *saved_tgids;
 };
 static struct saved_cmdlines_buffer *savedcmd;
 
@@ -1390,14 +1390,18 @@ static int allocate_cmdlines_buffer(unsigned int val,
 		kfree(s->map_cmdline_to_pid);
 		return -ENOMEM;
 	}
-
+	s->saved_tgids = kmalloc(val * sizeof(*s->saved_tgids), GFP_KERNEL);
+	if (!s->saved_tgids) {
+		kfree(s->map_cmdline_to_pid);
+		kfree(s->saved_cmdlines);
+		return -ENOMEM;
+	}
 	s->cmdline_idx = 0;
 	s->cmdline_num = val;
 	memset(&s->map_pid_to_cmdline, NO_CMDLINE_MAP,
 	       sizeof(s->map_pid_to_cmdline));
 	memset(s->map_cmdline_to_pid, NO_CMDLINE_MAP,
 	       val * sizeof(*s->map_cmdline_to_pid));
-
 	return 0;
 }
 
@@ -1592,7 +1596,7 @@ static int trace_save_cmdline(struct task_struct *tsk)
 	}
 
 	set_cmdline(idx, tsk->comm);
-	saved_tgids[idx] = tsk->tgid;
+	savedcmd->saved_tgids[idx] = tsk->tgid;
 	arch_spin_unlock(&trace_cmdline_lock);
 
 	return 1;
@@ -1619,7 +1623,7 @@ static void __trace_find_cmdline(int pid, char comm[])
 
 	map = savedcmd->map_pid_to_cmdline[pid];
 	if (map != NO_CMDLINE_MAP)
-		strcpy(comm, get_saved_cmdlines(map));
+		strlcpy(comm, get_saved_cmdlines(map), TASK_COMM_LEN-1);
 	else
 		strcpy(comm, "<...>");
 }
@@ -1644,7 +1648,7 @@ int trace_find_tgid(int pid)
 	arch_spin_lock(&trace_cmdline_lock);
 	map = savedcmd->map_pid_to_cmdline[pid];
 	if (map != NO_CMDLINE_MAP)
-		tgid = saved_tgids[map];
+		tgid = savedcmd->saved_tgids[map];
 	else
 		tgid = -1;
 
@@ -3981,6 +3985,7 @@ static void free_saved_cmdlines_buffer(struct saved_cmdlines_buffer *s)
 {
 	kfree(s->saved_cmdlines);
 	kfree(s->map_cmdline_to_pid);
+	kfree(s->saved_tgids);
 	kfree(s);
 }
 

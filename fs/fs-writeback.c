@@ -29,6 +29,7 @@
 #include <linux/device.h>
 #include <linux/memcontrol.h>
 #include "internal.h"
+#include <linux/hisi/pagecache_debug.h>
 
 /*
  * 4MB minimal write chunk size
@@ -173,19 +174,33 @@ static void wb_wakeup(struct bdi_writeback *wb)
 	spin_unlock_bh(&wb->work_lock);
 }
 
+static void finish_writeback_work(struct bdi_writeback *wb,
+				  struct wb_writeback_work *work)
+{
+	struct wb_completion *done = work->done;
+
+	if (work->auto_free)
+		kfree(work);
+	if (done && atomic_dec_and_test(&done->cnt))
+		wake_up_all(&wb->bdi->wb_waitq);
+}
+
 static void wb_queue_work(struct bdi_writeback *wb,
 			  struct wb_writeback_work *work)
 {
 	trace_writeback_queue(wb, work);
 
-	spin_lock_bh(&wb->work_lock);
-	if (!test_bit(WB_registered, &wb->state))
-		goto out_unlock;
 	if (work->done)
 		atomic_inc(&work->done->cnt);
-	list_add_tail(&work->list, &wb->work_list);
-	mod_delayed_work(bdi_wq, &wb->dwork, 0);
-out_unlock:
+
+	spin_lock_bh(&wb->work_lock);
+
+	if (test_bit(WB_registered, &wb->state)) {
+		list_add_tail(&work->list, &wb->work_list);
+		mod_delayed_work(bdi_wq, &wb->dwork, 0);
+	} else
+		finish_writeback_work(wb, work);
+
 	spin_unlock_bh(&wb->work_lock);
 }
 
@@ -1451,6 +1466,7 @@ static long writeback_sb_inodes(struct super_block *sb,
 		.range_cyclic		= work->range_cyclic,
 		.range_start		= 0,
 		.range_end		= LLONG_MAX,
+		.reason = work->reason,
 	};
 	unsigned long start_time = jiffies;
 	long write_chunk;
@@ -1703,6 +1719,7 @@ static long wb_writeback(struct bdi_writeback *wb,
 			oldest_jif = jiffies;
 
 		trace_writeback_start(wb, work);
+		pgcache_log(BIT_WRITEBACK_DUMP,	"writeback start");
 		if (list_empty(&wb->b_io))
 			queue_io(wb, work);
 		if (work->sb)
@@ -1839,16 +1856,9 @@ static long wb_do_writeback(struct bdi_writeback *wb)
 
 	set_bit(WB_writeback_running, &wb->state);
 	while ((work = get_next_work_item(wb)) != NULL) {
-		struct wb_completion *done = work->done;
-
 		trace_writeback_exec(wb, work);
-
 		wrote += wb_writeback(wb, work);
-
-		if (work->auto_free)
-			kfree(work);
-		if (done && atomic_dec_and_test(&done->cnt))
-			wake_up_all(&wb->bdi->wb_waitq);
+		finish_writeback_work(wb, work);
 	}
 
 	/*
@@ -1885,6 +1895,10 @@ void wb_workfn(struct work_struct *work)
 		do {
 			pages_written = wb_do_writeback(wb);
 			trace_writeback_pages_written(pages_written);
+			if(is_pagecache_stats_enable()) {
+				stat_inc_wb_count();
+				stat_inc_wb_pages_count(pages_written);
+			}
 		} while (!list_empty(&wb->work_list));
 	} else {
 		/*
@@ -1895,6 +1909,10 @@ void wb_workfn(struct work_struct *work)
 		pages_written = writeback_inodes_wb(wb, 1024,
 						    WB_REASON_FORKER_THREAD);
 		trace_writeback_pages_written(pages_written);
+		if(is_pagecache_stats_enable()) {
+			stat_inc_wb_count();
+			stat_inc_wb_pages_count(pages_written);
+		}
 	}
 
 	if (!list_empty(&wb->work_list))

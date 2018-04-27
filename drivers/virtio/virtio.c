@@ -260,10 +260,10 @@ static int virtio_dev_remove(struct device *_d)
 	virtio_config_disable(dev);
 
 	drv->remove(dev);
-
+#ifndef CONFIG_HISI_REMOTEPROC
 	/* Driver should have reset device. */
 	WARN_ON_ONCE(dev->config->get_status(dev));
-
+#endif
 	/* Acknowledge the device's existence again. */
 	add_status(dev, VIRTIO_CONFIG_S_ACKNOWLEDGE);
 	return 0;
@@ -323,6 +323,8 @@ int register_virtio_device(struct virtio_device *dev)
 	/* device_register() causes the bus infrastructure to look for a
 	 * matching driver. */
 	err = device_register(&dev->dev);
+	if (err)
+		ida_simple_remove(&virtio_index_ida, dev->index);
 out:
 	if (err)
 		add_status(dev, VIRTIO_CONFIG_S_FAILED);

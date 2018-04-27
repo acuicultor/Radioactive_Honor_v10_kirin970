@@ -58,7 +58,6 @@ struct ext4_encryption_context {
 #define EXT4_XTS_TWEAK_SIZE 16
 #define EXT4_AES_128_ECB_KEY_SIZE 16
 #define EXT4_AES_256_GCM_KEY_SIZE 32
-#define EXT4_AES_256_ECB_KEY_SIZE 32
 #define EXT4_AES_256_CBC_KEY_SIZE 32
 #define EXT4_AES_256_CTS_KEY_SIZE 32
 #define EXT4_AES_256_HEH_KEY_SIZE 32
@@ -80,6 +79,7 @@ struct ext4_crypt_info {
 	char		ci_filename_mode;
 	char		ci_flags;
 	struct crypto_ablkcipher *ci_ctfm;
+	struct key	*ci_keyring_key;
 	char		ci_master_key[EXT4_KEY_DESCRIPTOR_SIZE];
 };
 

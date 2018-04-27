@@ -19,6 +19,14 @@
 #include <asm/pgtable.h>
 #include "internal.h"
 
+#ifdef CONFIG_HUAWEI_UNMOVABLE_ISOLATE
+#include <linux/unmovable_isolate.h>
+#endif
+
+#ifdef CONFIG_ION
+#include <linux/hisi/hisi_ion.h>
+#endif
+
 void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
 {
 }
@@ -79,6 +87,13 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	available += global_page_state(NR_SLAB_RECLAIMABLE) -
 		     min(global_page_state(NR_SLAB_RECLAIMABLE) / 2, wmark_low);
 
+	/*
+	 * Add the ioncache pool pages
+	 */
+	available += global_page_state(NR_IONCACHE_PAGES);
+
+	available += (long)global_page_state(NR_MALI_PAGES);
+
 	if (available < 0)
 		available = 0;
 
@@ -99,6 +114,12 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		"Active(file):   %8lu kB\n"
 		"Inactive(file): %8lu kB\n"
 		"Unevictable:    %8lu kB\n"
+#ifdef CONFIG_TASK_PROTECT_LRU
+		"Active(prot_anon):   %8lu kB\n"
+		"Inactive(prot_anon): %8lu kB\n"
+		"Active(prot_file):   %8lu kB\n"
+		"Inactive(prot_file): %8lu kB\n"
+#endif
 		"Mlocked:        %8lu kB\n"
 #ifdef CONFIG_HIGHMEM
 		"HighTotal:      %8lu kB\n"
@@ -142,6 +163,14 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		"CmaTotal:       %8lu kB\n"
 		"CmaFree:        %8lu kB\n"
 #endif
+#ifdef CONFIG_HUAWEI_UNMOVABLE_ISOLATE
+		"Isolate1Free:   %8lu kB\n"
+		"Isolate2Free:   %8lu kB\n"
+#endif
+#ifdef CONFIG_ION
+		"IonTotalCache:  %8lu kB\n"
+		"IonTotalUsed:   %8lu kB\n"
+#endif
 		,
 		K(i.totalram),
 		K(i.freeram),
@@ -156,6 +185,12 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		K(pages[LRU_ACTIVE_FILE]),
 		K(pages[LRU_INACTIVE_FILE]),
 		K(pages[LRU_UNEVICTABLE]),
+#ifdef CONFIG_TASK_PROTECT_LRU
+		K(global_page_state(NR_PROTECT_ACTIVE_ANON)),
+		K(global_page_state(NR_PROTECT_INACTIVE_ANON)),
+		K(global_page_state(NR_PROTECT_ACTIVE_FILE)),
+		K(global_page_state(NR_PROTECT_INACTIVE_FILE)),
+#endif
 		K(global_page_state(NR_MLOCK)),
 #ifdef CONFIG_HIGHMEM
 		K(i.totalhigh),
@@ -200,6 +235,14 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 #ifdef CONFIG_CMA
 		, K(totalcma_pages)
 		, K(global_page_state(NR_FREE_CMA_PAGES))
+#endif
+#ifdef CONFIG_HUAWEI_UNMOVABLE_ISOLATE
+		, K(global_page_state(NR_FREE_UNMOVABLE_ISOLATE1_PAGES))
+		, K(global_page_state(NR_FREE_UNMOVABLE_ISOLATE2_PAGES))
+#endif
+#ifdef CONFIG_ION
+		, K(global_page_state(NR_IONCACHE_PAGES))
+		, K(hisi_ion_total() >> PAGE_SHIFT)
 #endif
 		);
 

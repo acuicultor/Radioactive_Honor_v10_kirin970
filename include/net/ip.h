@@ -241,6 +241,9 @@ static inline int inet_is_local_reserved_port(struct net *net, int port)
 }
 #endif
 
+extern int sysctl_local_reserved_ports_bind_ctrl;
+extern int sysctl_local_reserved_ports_bind_pid;
+
 /* From inetpeer.c */
 extern int inet_peer_threshold;
 extern int inet_peer_minttl;

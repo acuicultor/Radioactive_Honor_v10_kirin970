@@ -24,27 +24,27 @@
 #include <linux/cpu_pm.h>
 #include <linux/errno.h>
 #include <linux/hw_breakpoint.h>
+#include <linux/kprobes.h>
 #include <linux/perf_event.h>
 #include <linux/ptrace.h>
 #include <linux/smp.h>
 
 #include <asm/compat.h>
-#include <asm/current.h>
+#include <asm/current.h>/*lint !e451*/
 #include <asm/debug-monitors.h>
 #include <asm/hw_breakpoint.h>
 #include <asm/traps.h>
 #include <asm/cputype.h>
 #include <asm/system_misc.h>
-#include <asm/uaccess.h>
 
 /* Breakpoint currently in use for each BRP. */
 static DEFINE_PER_CPU(struct perf_event *, bp_on_reg[ARM_MAX_BRP]);
 
 /* Watchpoint currently in use for each WRP. */
-static DEFINE_PER_CPU(struct perf_event *, wp_on_reg[ARM_MAX_WRP]);
+static DEFINE_PER_CPU(struct perf_event *, wp_on_reg[ARM_MAX_WRP]);/*lint !e31*/
 
 /* Currently stepping a per-CPU kernel breakpoint. */
-static DEFINE_PER_CPU(int, stepping_kernel_bp);
+static DEFINE_PER_CPU(int, stepping_kernel_bp);/*lint !e129*/
 
 /* Number of BRP/WRP registers on this CPU. */
 static int core_num_brps;
@@ -128,6 +128,7 @@ static u64 read_wb_reg(int reg, int n)
 
 	return val;
 }
+NOKPROBE_SYMBOL(read_wb_reg);
 
 static void write_wb_reg(int reg, int n, u64 val)
 {
@@ -141,6 +142,7 @@ static void write_wb_reg(int reg, int n, u64 val)
 	}
 	isb();
 }
+NOKPROBE_SYMBOL(write_wb_reg);
 
 /*
  * Convert a breakpoint privilege level to the corresponding exception
@@ -155,9 +157,10 @@ static enum dbg_active_el debug_exception_level(int privilege)
 		return DBG_ACTIVE_EL1;
 	default:
 		pr_warning("invalid breakpoint privilege level %d\n", privilege);
-		return -EINVAL;
+		return -EINVAL;/*lint !e64*/
 	}
 }
+NOKPROBE_SYMBOL(debug_exception_level);
 
 enum hw_breakpoint_ops {
 	HW_BREAKPOINT_INSTALL,
@@ -241,14 +244,14 @@ static int hw_breakpoint_control(struct perf_event *bp,
 		/* Breakpoint */
 		ctrl_reg = AARCH64_DBG_REG_BCR;
 		val_reg = AARCH64_DBG_REG_BVR;
-		slots = this_cpu_ptr(bp_on_reg);
+		slots = this_cpu_ptr(bp_on_reg);/*lint !e64 !e507*/
 		max_slots = core_num_brps;
 		reg_enable = !debug_info->bps_disabled;
 	} else {
 		/* Watchpoint */
 		ctrl_reg = AARCH64_DBG_REG_WCR;
 		val_reg = AARCH64_DBG_REG_WVR;
-		slots = this_cpu_ptr(wp_on_reg);
+		slots = this_cpu_ptr(wp_on_reg);/*lint !e64 !e507*/
 		max_slots = core_num_wrps;
 		reg_enable = !debug_info->wps_disabled;
 	}
@@ -494,6 +497,26 @@ static int arch_build_bp_info(struct perf_event *bp)
 	/* Address */
 	info->address = bp->attr.bp_addr;
 
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+	/* Address Mask */
+	if (bp->attr.bp_addr_mask != ARM_WATCHPOINT_ADDR_MASK_0) {
+		if ((bp->attr.bp_addr_mask < ARM_WATCHPOINT_ADDR_MASK_3) ||
+			(bp->attr.bp_addr_mask > ARM_WATCHPOINT_ADDR_MASK_MAX)) {
+			/*1 and 2 is reserved, the max value is 31 */
+			return -EINVAL;
+		}
+
+		/* len should be LEN_8 */
+		if (info->ctrl.len != ARM_BREAKPOINT_LEN_8) {
+			return -EINVAL;
+		}
+	}
+
+	/* Address Mask */
+	info->ctrl.mask = bp->attr.bp_addr_mask;
+	info->ctrl.ssc = ARM_SSC_NON_SECURE;
+#endif
+
 	/*
 	 * Privilege
 	 * Note that we disallow combined EL0/EL1 breakpoints because
@@ -547,11 +570,11 @@ int arch_validate_hwbkpt_settings(struct perf_event *bp)
 			/* Allow single byte watchpoint. */
 			if (info->ctrl.len == ARM_BREAKPOINT_LEN_1)
 				break;
-		case 2:
+		case 2:/*lint !e616*/
 			/* Allow halfword watchpoints and breakpoints. */
 			if (info->ctrl.len == ARM_BREAKPOINT_LEN_2)
 				break;
-		default:
+		default:/*lint !e616*/
 			return -EINVAL;
 		}
 	} else {
@@ -562,6 +585,15 @@ int arch_validate_hwbkpt_settings(struct perf_event *bp)
 		offset = info->address & alignment_mask;
 	}
 
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+	/* Address Mask */
+	if (info->ctrl.mask != ARM_WATCHPOINT_ADDR_MASK_0) {
+		if (info->address & ((1<< info->ctrl.mask) - 1)) {/*lint !e647*/
+			/* addr is size aligned */
+			return -EINVAL;
+		}
+	}
+#endif
 	info->address &= ~alignment_mask;
 	info->ctrl.len <<= offset;
 
@@ -588,11 +620,11 @@ static void toggle_bp_registers(int reg, enum dbg_active_el el, int enable)
 
 	switch (reg) {
 	case AARCH64_DBG_REG_BCR:
-		slots = this_cpu_ptr(bp_on_reg);
+		slots = this_cpu_ptr(bp_on_reg);/*lint !e64 !e507*/
 		max_slots = core_num_brps;
 		break;
 	case AARCH64_DBG_REG_WCR:
-		slots = this_cpu_ptr(wp_on_reg);
+		slots = this_cpu_ptr(wp_on_reg);/*lint !e64 !e507*/
 		max_slots = core_num_wrps;
 		break;
 	default:
@@ -615,6 +647,7 @@ static void toggle_bp_registers(int reg, enum dbg_active_el el, int enable)
 		write_wb_reg(reg, i, ctrl);
 	}
 }
+NOKPROBE_SYMBOL(toggle_bp_registers);
 
 /*
  * Debug exception handlers.
@@ -629,7 +662,7 @@ static int breakpoint_handler(unsigned long unused, unsigned int esr,
 	struct debug_info *debug_info;
 	struct arch_hw_breakpoint_ctrl ctrl;
 
-	slots = this_cpu_ptr(bp_on_reg);
+	slots = this_cpu_ptr(bp_on_reg);/*lint !e64 !e507*/
 	addr = instruction_pointer(regs);
 	debug_info = &current->thread.debug;
 
@@ -679,7 +712,7 @@ unlock:
 			user_enable_single_step(current);
 	} else {
 		toggle_bp_registers(AARCH64_DBG_REG_BCR, DBG_ACTIVE_EL1, 0);
-		kernel_step = this_cpu_ptr(&stepping_kernel_bp);
+		kernel_step = this_cpu_ptr(&stepping_kernel_bp);/*lint !e64 !e507*/
 
 		if (*kernel_step != ARM_KERNEL_STEP_NONE)
 			return 0;
@@ -694,6 +727,7 @@ unlock:
 
 	return 0;
 }
+NOKPROBE_SYMBOL(breakpoint_handler);
 
 /*
  * Arm64 hardware does not always report a watchpoint hit address that matches
@@ -741,7 +775,7 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 	struct arch_hw_breakpoint *info;
 	struct arch_hw_breakpoint_ctrl ctrl;
 
-	slots = this_cpu_ptr(wp_on_reg);
+	slots = this_cpu_ptr(wp_on_reg);/*lint !e64 !e507*/
 	debug_info = &current->thread.debug;
 
 	/*
@@ -767,6 +801,16 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 		val = read_wb_reg(AARCH64_DBG_REG_WVR, i);
 		ctrl_reg = read_wb_reg(AARCH64_DBG_REG_WCR, i);
 		decode_ctrl_reg(ctrl_reg, &ctrl);
+
+		info = counter_arch_bp(wp);
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+		/* check addr range */
+		if (info->ctrl.mask != ARM_WATCHPOINT_ADDR_MASK_0) {
+			if (val != (addr & ~((1 << info->ctrl.mask) - 1))){/*lint !e502 !e647*/
+				continue;
+			}
+		} else {
+#endif
 		dist = get_distance_from_watchpoint(addr, val, &ctrl);
 		if (dist < min_dist) {
 			min_dist = dist;
@@ -776,13 +820,21 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 		if (dist != 0)
 			continue;
 
-		info = counter_arch_bp(wp);
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+		}
+#endif
+
 		info->trigger = addr;
 		perf_bp_event(wp, regs);
 
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+		/* We need to handle the stepping */
+		step = 1;
+#else
 		/* Do we need to handle the stepping? */
 		if (!wp->overflow_handler)
 			step = 1;
+#endif
 	}
 	if (min_dist > 0 && min_dist != -1) {
 		/* No exact match found. */
@@ -819,7 +871,7 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 			user_enable_single_step(current);
 	} else {
 		toggle_bp_registers(AARCH64_DBG_REG_WCR, DBG_ACTIVE_EL1, 0);
-		kernel_step = this_cpu_ptr(&stepping_kernel_bp);
+		kernel_step = this_cpu_ptr(&stepping_kernel_bp);/*lint !e64 !e507*/
 
 		if (*kernel_step != ARM_KERNEL_STEP_NONE)
 			return 0;
@@ -834,6 +886,7 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 
 	return 0;
 }
+NOKPROBE_SYMBOL(watchpoint_handler);
 
 /*
  * Handle single-step exception.
@@ -843,7 +896,7 @@ int reinstall_suspended_bps(struct pt_regs *regs)
 	struct debug_info *debug_info = &current->thread.debug;
 	int handled_exception = 0, *kernel_step;
 
-	kernel_step = this_cpu_ptr(&stepping_kernel_bp);
+	kernel_step = this_cpu_ptr(&stepping_kernel_bp);/*lint !e64 !e507*/
 
 	/*
 	 * Called from single-step exception handler.
@@ -891,6 +944,7 @@ int reinstall_suspended_bps(struct pt_regs *regs)
 
 	return !handled_exception;
 }
+NOKPROBE_SYMBOL(reinstall_suspended_bps);
 
 /*
  * Context-switcher for restoring suspended breakpoints.
@@ -941,7 +995,7 @@ static void hw_breakpoint_reset(void *unused)
 	 * notifier some slots might be initialized; if so they are
 	 * reprogrammed according to the debug slots content.
 	 */
-	for (slots = this_cpu_ptr(bp_on_reg), i = 0; i < core_num_brps; ++i) {
+	for (slots = this_cpu_ptr(bp_on_reg), i = 0; i < core_num_brps; ++i) {/*lint !e64 !e507*/
 		if (slots[i]) {
 			hw_breakpoint_control(slots[i], HW_BREAKPOINT_RESTORE);
 		} else {
@@ -950,7 +1004,7 @@ static void hw_breakpoint_reset(void *unused)
 		}
 	}
 
-	for (slots = this_cpu_ptr(wp_on_reg), i = 0; i < core_num_wrps; ++i) {
+	for (slots = this_cpu_ptr(wp_on_reg), i = 0; i < core_num_wrps; ++i) {/*lint !e64 !e507*/
 		if (slots[i]) {
 			hw_breakpoint_control(slots[i], HW_BREAKPOINT_RESTORE);
 		} else {
@@ -1032,3 +1086,4 @@ int hw_breakpoint_exceptions_notify(struct notifier_block *unused,
 {
 	return NOTIFY_DONE;
 }
+

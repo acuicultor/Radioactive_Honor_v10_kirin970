@@ -350,8 +350,8 @@ static void async_completion(struct nvme_queue *nvmeq, void *ctx,
 	struct async_cmd_info *cmdinfo = ctx;
 	cmdinfo->result = le32_to_cpup(&cqe->result);
 	cmdinfo->status = le16_to_cpup(&cqe->status) >> 1;
-	blk_mq_free_request(cmdinfo->req);
 	queue_kthread_work(cmdinfo->worker, &cmdinfo->work);
+	blk_mq_free_request(cmdinfo->req);
 }
 
 static inline struct nvme_cmd_info *get_cmd_from_tag(struct nvme_queue *nvmeq,
@@ -1633,14 +1633,9 @@ static int nvme_wait_ready(struct nvme_dev *dev, u64 cap, bool enabled)
  */
 static int nvme_disable_ctrl(struct nvme_dev *dev, u64 cap)
 {
-	struct pci_dev *pdev = to_pci_dev(dev->dev);
-
 	dev->ctrl_config &= ~NVME_CC_SHN_MASK;
 	dev->ctrl_config &= ~NVME_CC_ENABLE;
 	writel(dev->ctrl_config, &dev->bar->cc);
-
-	if (pdev->vendor == 0x1c58 && pdev->device == 0x0003)
-		msleep(NVME_QUIRK_DELAY_AMOUNT);
 
 	return nvme_wait_ready(dev, cap, false);
 }
@@ -2285,7 +2280,7 @@ static void nvme_alloc_ns(struct nvme_dev *dev, unsigned nsid)
 	if (dev->stripe_size)
 		blk_queue_chunk_sectors(ns->queue, dev->stripe_size >> 9);
 	if (dev->vwc & NVME_CTRL_VWC_PRESENT)
-		blk_queue_flush(ns->queue, REQ_FLUSH | REQ_FUA);
+		blk_queue_write_cache(ns->queue, true, true);
 	blk_queue_virt_boundary(ns->queue, dev->page_size - 1);
 
 	disk->major = nvme_major;
@@ -2954,7 +2949,6 @@ static void nvme_dev_shutdown(struct nvme_dev *dev)
 
 	nvme_dev_list_remove(dev);
 
-	mutex_lock(&dev->shutdown_lock);
 	if (pci_is_enabled(to_pci_dev(dev->dev))) {
 		nvme_freeze_queues(dev);
 		csts = readl(&dev->bar->csts);
@@ -2973,7 +2967,6 @@ static void nvme_dev_shutdown(struct nvme_dev *dev)
 
 	for (i = dev->queue_count - 1; i >= 0; i--)
 		nvme_clear_queue(dev->queues[i]);
-	mutex_unlock(&dev->shutdown_lock);
 }
 
 static void nvme_dev_remove(struct nvme_dev *dev)
@@ -3330,7 +3323,6 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	INIT_LIST_HEAD(&dev->namespaces);
 	INIT_WORK(&dev->reset_work, nvme_reset_work);
-	mutex_init(&dev->shutdown_lock);
 	dev->dev = get_device(&pdev->dev);
 	pci_set_drvdata(pdev, dev);
 

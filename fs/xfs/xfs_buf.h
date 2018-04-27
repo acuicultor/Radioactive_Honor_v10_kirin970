@@ -105,7 +105,6 @@ typedef unsigned int xfs_buf_flags_t;
 typedef struct xfs_buftarg {
 	dev_t			bt_dev;
 	struct block_device	*bt_bdev;
-	struct backing_dev_info	*bt_bdi;
 	struct xfs_mount	*bt_mount;
 	unsigned int		bt_meta_sectorsize;
 	size_t			bt_meta_sectormask;
@@ -304,7 +303,6 @@ extern void xfs_buf_iomove(xfs_buf_t *, size_t, size_t, void *,
 extern void *xfs_buf_offset(struct xfs_buf *, size_t);
 
 /* Delayed Write Buffer Routines */
-extern void xfs_buf_delwri_cancel(struct list_head *);
 extern bool xfs_buf_delwri_queue(struct xfs_buf *, struct list_head *);
 extern int xfs_buf_delwri_submit(struct list_head *);
 extern int xfs_buf_delwri_submit_nowait(struct list_head *);

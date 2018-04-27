@@ -40,8 +40,6 @@
 
 #include "hyperv_net.h"
 
-/* Restrict GSO size to account for NVGRE */
-#define NETVSC_GSO_MAX_SIZE	62768
 
 #define RING_SIZE_MIN 64
 static int ring_size = 128;

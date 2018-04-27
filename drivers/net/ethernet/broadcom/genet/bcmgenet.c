@@ -3495,8 +3495,7 @@ static int bcmgenet_suspend(struct device *d)
 
 	bcmgenet_netif_stop(dev);
 
-	if (!device_may_wakeup(d))
-		phy_suspend(priv->phydev);
+	phy_suspend(priv->phydev);
 
 	netif_device_detach(dev);
 
@@ -3593,8 +3592,7 @@ static int bcmgenet_resume(struct device *d)
 
 	netif_device_attach(dev);
 
-	if (!device_may_wakeup(d))
-		phy_resume(priv->phydev);
+	phy_resume(priv->phydev);
 
 	if (priv->eee.eee_enabled)
 		bcmgenet_eee_enable_set(dev, true);

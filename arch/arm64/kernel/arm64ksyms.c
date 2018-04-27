@@ -26,6 +26,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/io.h>
+#include <linux/kprobes.h>
 
 #include <asm/checksum.h>
 
@@ -40,6 +41,7 @@ EXPORT_SYMBOL(__copy_in_user);
 
 	/* physical memory */
 EXPORT_SYMBOL(memstart_addr);
+EXPORT_SYMBOL(phystart_addr);
 
 	/* string / mem functions */
 EXPORT_SYMBOL(strchr);
@@ -67,4 +69,5 @@ EXPORT_SYMBOL(test_and_change_bit);
 
 #ifdef CONFIG_FUNCTION_TRACER
 EXPORT_SYMBOL(_mcount);
+NOKPROBE_SYMBOL(_mcount);
 #endif

@@ -102,6 +102,21 @@ static struct notifier_block blk_cpu_notifier = {
 	.notifier_call	= blk_cpu_notify,
 };
 
+#ifdef CONFIG_HISI_MQ_DISPATCH_DECISION
+void hisi_blk_complete_request(struct request *req)
+{
+	struct list_head *list;
+	unsigned long flags;
+
+	local_irq_save(flags);
+	list = this_cpu_ptr(&blk_cpu_done);
+	list_add_tail(&req->ipi_list, list);
+	if (likely(list->next == &req->ipi_list))
+		raise_softirq_irqoff(BLOCK_SOFTIRQ);
+	local_irq_restore(flags);
+}
+#endif
+
 void __blk_complete_request(struct request *req)
 {
 	int ccpu, cpu;

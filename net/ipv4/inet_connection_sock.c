@@ -23,7 +23,22 @@
 #include <net/route.h>
 #include <net/tcp_states.h>
 #include <net/xfrm.h>
+#ifdef CONFIG_MPTCP
+#include <net/mptcp.h>
+#endif
 #include <net/tcp.h>
+
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+#include <net/tcp_crosslayer.h>
+#endif
+
+#ifdef CONFIG_HW_NETWORK_MEASUREMENT
+#include <huawei_platform/emcom/smartcare/network_measurement/nm.h>
+#endif /* CONFIG_HW_NETWORK_MEASUREMENT */
+
+#ifdef CONFIG_HW_QTAGUID_PID
+#include <huawei_platform/net/qtaguid_pid/qtaguid_pid.h>
+#endif
 
 #ifdef INET_CSK_DEBUG
 const char inet_csk_timer_bug_msg[] = "inet_csk BUG: unknown timer value\n";
@@ -179,6 +194,15 @@ have_snum:
 		head = &hashinfo->bhash[inet_bhashfn(net, snum,
 				hashinfo->bhash_size)];
 		spin_lock(&head->lock);
+
+		if (inet_is_local_reserved_port(net, snum) &&
+			!sysctl_local_reserved_ports_bind_ctrl &&
+			(!sysctl_local_reserved_ports_bind_pid ||
+			 sysctl_local_reserved_ports_bind_pid != current->tgid)) {
+			ret = 1;
+			goto fail_unlock;
+		}
+
 		inet_bind_bucket_for_each(tb, &head->chain)
 			if (net_eq(ib_net(tb), net) && tb->port == snum)
 				goto tb_found;
@@ -562,7 +586,12 @@ static void reqsk_timer_handler(unsigned long data)
 	int max_retries, thresh;
 	u8 defer_accept;
 
+#ifdef CONFIG_MPTCP
+	if (sk_state_load(sk_listener) != TCP_LISTEN &&
+	    !is_meta_sk(sk_listener))
+#else
 	if (sk_state_load(sk_listener) != TCP_LISTEN)
+#endif
 		goto drop;
 
 	max_retries = icsk->icsk_syn_retries ? : sysctl_tcp_synack_retries;
@@ -703,6 +732,23 @@ void inet_csk_destroy_sock(struct sock *sk)
 
 	/* If it has not 0 inet_sk(sk)->inet_num, it must be bound */
 	WARN_ON(inet_sk(sk)->inet_num && !inet_csk(sk)->icsk_bind_hash);
+
+#ifdef CONFIG_HW_QTAGUID_PID
+	qtaguid_pid_remove(sk);
+#endif
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	aspen_unmark_hashtable(sk);
+#endif
+#ifdef CONFIG_TCP_ARGO
+	argo_deinit(sk);
+#endif /* CONFIG_TCP_ARGO */
+
+#ifdef CONFIG_HW_NETWORK_MEASUREMENT
+#ifdef CONFIG_MPTCP
+	if (!is_mptcp_sk(sk))
+#endif
+	tcp_measure_deinit(sk);
+#endif /* CONFIG_HW_NETWORK_MEASUREMENT */
 
 	sk->sk_prot->destroy(sk);
 
@@ -851,7 +897,14 @@ void inet_csk_listen_stop(struct sock *sk)
 	 */
 	while ((req = reqsk_queue_remove(queue, sk)) != NULL) {
 		struct sock *child = req->sk;
+#ifdef CONFIG_MPTCP
+		bool mutex_taken = false;
 
+		if (is_meta_sk(child)) {
+			mutex_lock(&tcp_sk(child)->mpcb->mpcb_mutex);
+			mutex_taken = true;
+		}
+#endif
 		local_bh_disable();
 		bh_lock_sock(child);
 		WARN_ON(sock_owned_by_user(child));
@@ -860,6 +913,10 @@ void inet_csk_listen_stop(struct sock *sk)
 		inet_child_forget(sk, req, child);
 		bh_unlock_sock(child);
 		local_bh_enable();
+#ifdef CONFIG_MPTCP
+		if (mutex_taken)
+			mutex_unlock(&tcp_sk(child)->mpcb->mpcb_mutex);
+#endif
 		sock_put(child);
 
 		cond_resched();

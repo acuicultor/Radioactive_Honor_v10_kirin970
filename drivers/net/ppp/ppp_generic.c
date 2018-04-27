@@ -942,6 +942,7 @@ static __net_exit void ppp_exit_net(struct net *net)
 	unregister_netdevice_many(&list);
 	rtnl_unlock();
 
+	mutex_destroy(&pn->all_ppp_mutex);
 	idr_destroy(&pn->units_idr);
 }
 
@@ -2410,7 +2411,8 @@ ppp_unregister_channel(struct ppp_channel *chan)
 	spin_lock_bh(&pn->all_channels_lock);
 	list_del(&pch->list);
 	spin_unlock_bh(&pn->all_channels_lock);
-
+	put_net(pch->chan_net);
+	pch->chan_net = NULL;
 	pch->file.dead = 1;
 	wake_up_interruptible(&pch->file.rwait);
 	if (atomic_dec_and_test(&pch->file.refcnt))

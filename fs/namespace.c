@@ -24,6 +24,7 @@
 #include <linux/magic.h>
 #include <linux/bootmem.h>
 #include <linux/task_work.h>
+#include <linux/hisi/pagecache_manage.h>
 #include "pnode.h"
 #include "internal.h"
 
@@ -238,7 +239,6 @@ static struct mount *alloc_vfsmnt(const char *name)
 		INIT_LIST_HEAD(&mnt->mnt_slave_list);
 		INIT_LIST_HEAD(&mnt->mnt_slave);
 		INIT_HLIST_NODE(&mnt->mnt_mp_list);
-		INIT_LIST_HEAD(&mnt->mnt_umounting);
 #ifdef CONFIG_FSNOTIFY
 		INIT_HLIST_HEAD(&mnt->mnt_fsnotify_marks);
 #endif
@@ -644,6 +644,28 @@ struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
 }
 
 /*
+ * find the last mount at @dentry on vfsmount @mnt.
+ * mount_lock must be held.
+ */
+struct mount *__lookup_mnt_last(struct vfsmount *mnt, struct dentry *dentry)
+{
+	struct mount *p, *res = NULL;
+	p = __lookup_mnt(mnt, dentry);
+	if (!p)
+		goto out;
+	if (!(p->mnt.mnt_flags & MNT_UMOUNT))
+		res = p;
+	hlist_for_each_entry_continue(p, mnt_hash) {
+		if (&p->mnt_parent->mnt != mnt || p->mnt_mountpoint != dentry)
+			break;
+		if (!(p->mnt.mnt_flags & MNT_UMOUNT))
+			res = p;
+	}
+out:
+	return res;
+}
+
+/*
  * lookup_mnt - Return the first child mount mounted at path
  *
  * "First" means first mounted chronologically.  If you create the
@@ -863,13 +885,6 @@ void mnt_set_mountpoint(struct mount *mnt,
 	hlist_add_head(&child_mnt->mnt_mp_list, &mp->m_list);
 }
 
-static void __attach_mnt(struct mount *mnt, struct mount *parent)
-{
-	hlist_add_head_rcu(&mnt->mnt_hash,
-			   m_hash(&parent->mnt, mnt->mnt_mountpoint));
-	list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
-}
-
 /*
  * vfsmount lock must be held for write
  */
@@ -878,45 +893,28 @@ static void attach_mnt(struct mount *mnt,
 			struct mountpoint *mp)
 {
 	mnt_set_mountpoint(parent, mp, mnt);
-	__attach_mnt(mnt, parent);
+	hlist_add_head_rcu(&mnt->mnt_hash, m_hash(&parent->mnt, mp->m_dentry));
+	list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
 }
 
-void mnt_change_mountpoint(struct mount *parent, struct mountpoint *mp, struct mount *mnt)
+static void attach_shadowed(struct mount *mnt,
+			struct mount *parent,
+			struct mount *shadows)
 {
-	struct mountpoint *old_mp = mnt->mnt_mp;
-	struct dentry *old_mountpoint = mnt->mnt_mountpoint;
-	struct mount *old_parent = mnt->mnt_parent;
-
-	list_del_init(&mnt->mnt_child);
-	hlist_del_init(&mnt->mnt_mp_list);
-	hlist_del_init_rcu(&mnt->mnt_hash);
-
-	attach_mnt(mnt, parent, mp);
-
-	put_mountpoint(old_mp);
-
-	/*
-	 * Safely avoid even the suggestion this code might sleep or
-	 * lock the mount hash by taking advantage of the knowledge that
-	 * mnt_change_mountpoint will not release the final reference
-	 * to a mountpoint.
-	 *
-	 * During mounting, the mount passed in as the parent mount will
-	 * continue to use the old mountpoint and during unmounting, the
-	 * old mountpoint will continue to exist until namespace_unlock,
-	 * which happens well after mnt_change_mountpoint.
-	 */
-	spin_lock(&old_mountpoint->d_lock);
-	old_mountpoint->d_lockref.count--;
-	spin_unlock(&old_mountpoint->d_lock);
-
-	mnt_add_count(old_parent, -1);
+	if (shadows) {
+		hlist_add_behind_rcu(&mnt->mnt_hash, &shadows->mnt_hash);
+		list_add(&mnt->mnt_child, &shadows->mnt_child);
+	} else {
+		hlist_add_head_rcu(&mnt->mnt_hash,
+				m_hash(&parent->mnt, mnt->mnt_mountpoint));
+		list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
+	}
 }
 
 /*
  * vfsmount lock must be held for write
  */
-static void commit_tree(struct mount *mnt)
+static void commit_tree(struct mount *mnt, struct mount *shadows)
 {
 	struct mount *parent = mnt->mnt_parent;
 	struct mount *m;
@@ -934,7 +932,7 @@ static void commit_tree(struct mount *mnt)
 	n->mounts += n->pending_mounts;
 	n->pending_mounts = 0;
 
-	__attach_mnt(mnt, parent);
+	attach_shadowed(mnt, parent, shadows);
 	touch_mnt_namespace(n);
 }
 
@@ -988,7 +986,7 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 	if (flags & MS_KERNMOUNT)
 		mnt->mnt.mnt_flags = MNT_INTERNAL;
 
-	root = mount_fs(type, flags, name, &mnt->mnt, data);
+	root = mount_fs(type, flags, name, data);
 	if (IS_ERR(root)) {
 		mnt_free_id(mnt);
 		free_vfsmnt(mnt);
@@ -1508,6 +1506,8 @@ static int do_umount(struct mount *mnt, int flags)
 	struct super_block *sb = mnt->mnt.mnt_sb;
 	int retval;
 
+	umounting_fs_register_pch(sb);
+
 	retval = security_sb_umount(&mnt->mnt, flags);
 	if (retval)
 		return retval;
@@ -1594,6 +1594,7 @@ static int do_umount(struct mount *mnt, int flags)
 	}
 	unlock_mount_hash();
 	namespace_unlock();
+	umounted_fs_register_pch(sb);
 	return retval;
 }
 
@@ -1750,6 +1751,7 @@ struct mount *copy_tree(struct mount *mnt, struct dentry *dentry,
 			continue;
 
 		for (s = r; s; s = next_mnt(s, r)) {
+			struct mount *t = NULL;
 			if (!(flag & CL_COPY_UNBINDABLE) &&
 			    IS_MNT_UNBINDABLE(s)) {
 				s = skip_mnt_tree(s);
@@ -1771,7 +1773,14 @@ struct mount *copy_tree(struct mount *mnt, struct dentry *dentry,
 				goto out;
 			lock_mount_hash();
 			list_add_tail(&q->mnt_list, &res->mnt_list);
-			attach_mnt(q, parent, p->mnt_mp);
+			mnt_set_mountpoint(parent, p->mnt_mp, q);
+			if (!list_empty(&parent->mnt_mounts)) {
+				t = list_last_entry(&parent->mnt_mounts,
+					struct mount, mnt_child);
+				if (t->mnt_mp != p->mnt_mp)
+					t = NULL;
+			}
+			attach_shadowed(q, parent, t);
 			unlock_mount_hash();
 		}
 	}
@@ -1972,17 +1981,9 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 {
 	HLIST_HEAD(tree_list);
 	struct mnt_namespace *ns = dest_mnt->mnt_ns;
-	struct mountpoint *smp;
 	struct mount *child, *p;
 	struct hlist_node *n;
 	int err;
-
-	/* Preallocate a mountpoint in case the new mounts need
-	 * to be tucked under other mounts.
-	 */
-	smp = get_mountpoint(source_mnt->mnt.mnt_root);
-	if (IS_ERR(smp))
-		return PTR_ERR(smp);
 
 	/* Is there space to add these mounts to the mount namespace? */
 	if (!parent_path) {
@@ -2010,19 +2011,16 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 		touch_mnt_namespace(source_mnt->mnt_ns);
 	} else {
 		mnt_set_mountpoint(dest_mnt, dest_mp, source_mnt);
-		commit_tree(source_mnt);
+		commit_tree(source_mnt, NULL);
 	}
 
 	hlist_for_each_entry_safe(child, n, &tree_list, mnt_hash) {
 		struct mount *q;
 		hlist_del_init(&child->mnt_hash);
-		q = __lookup_mnt(&child->mnt_parent->mnt,
-				 child->mnt_mountpoint);
-		if (q)
-			mnt_change_mountpoint(child, smp, q);
-		commit_tree(child);
+		q = __lookup_mnt_last(&child->mnt_parent->mnt,
+				      child->mnt_mountpoint);
+		commit_tree(child, q);
 	}
-	put_mountpoint(smp);
 	unlock_mount_hash();
 
 	return 0;
@@ -2037,11 +2035,6 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 	cleanup_group_ids(source_mnt, NULL);
  out:
 	ns->pending_mounts = 0;
-
-	read_seqlock_excl(&mount_lock);
-	put_mountpoint(smp);
-	read_sequnlock_excl(&mount_lock);
-
 	return err;
 }
 
@@ -2307,7 +2300,7 @@ static int do_remount(struct path *path, int flags, int mnt_flags,
 	else if (!capable(CAP_SYS_ADMIN))
 		err = -EPERM;
 	else {
-		err = do_remount_sb2(path->mnt, sb, flags, data, 0);
+		err = do_remount_sb(sb, flags, data, 0);
 		namespace_lock();
 		lock_mount_hash();
 		propagate_remount(mnt);
@@ -2525,6 +2518,9 @@ static int do_new_mount(struct path *path, const char *fstype, int flags,
 	err = do_add_mount(real_mount(mnt), path, mnt_flags);
 	if (err)
 		mntput(mnt);
+	else
+		mount_fs_register_pch(mnt);
+
 	return err;
 }
 
@@ -3001,6 +2997,12 @@ struct dentry *mount_subtree(struct vfsmount *mnt, const char *name)
 }
 EXPORT_SYMBOL(mount_subtree);
 
+#ifdef CONFIG_SDCARD_FS
+/* defined in sdcardfs/sdcardd.c */
+extern int sdcardfs_ignore_bind_mount(char *, char __user *);
+extern int sdcardfs_do_sdcard_remount(char **, char __user *, char *);
+#endif
+
 SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 		char __user *, type, unsigned long, flags, void __user *, data)
 {
@@ -3019,13 +3021,42 @@ SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 	if (IS_ERR(kernel_dev))
 		goto out_dev;
 
+#ifdef CONFIG_SDCARD_FS
+	/* to support sdcardfs sdcardd mount (bind mount) */
+	if (unlikely(flags & MS_BIND)) {
+		if (!sdcardfs_ignore_bind_mount(kernel_dev, dir_name)) {
+			ret = 0;
+			goto out_data;
+		}
+	}
+#endif
+
 	ret = copy_mount_options(data, &data_page);
 	if (ret < 0)
 		goto out_data;
 
+#ifdef CONFIG_SDCARD_FS
+	/* to support sdcardfs sdcardd mount (remount) */
+	if (unlikely(flags & MS_REMOUNT)) {
+		char *orig_dev = kernel_dev;
+		ret = sdcardfs_do_sdcard_remount(&orig_dev,
+			dir_name, (char *) data_page);
+
+		if (!ret) {
+			ret = do_mount(orig_dev, dir_name, "sdcardfs",
+				flags & ~MS_REMOUNT, (void *) data_page);
+			kfree(orig_dev);
+			goto out_freepage;
+		}
+	}
+#endif
+
 	ret = do_mount(kernel_dev, dir_name, kernel_type, flags,
 		(void *) data_page);
 
+#ifdef CONFIG_SDCARD_FS
+out_freepage:
+#endif
 	free_page(data_page);
 out_data:
 	kfree(kernel_dev);

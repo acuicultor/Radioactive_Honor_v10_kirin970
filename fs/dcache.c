@@ -1626,6 +1626,12 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	dentry->d_sb = sb;
 	dentry->d_op = NULL;
 	dentry->d_fsdata = NULL;
+#ifdef CONFIG_HISI_PAGECACHE_DEBUG
+	dentry->mapping_stat.mmap_sync_read_times = 0;
+	dentry->mapping_stat.generic_sync_read_times = 0;
+	dentry->mapping_stat.async_read_times = 0;
+	dentry->mapping_stat.shrink_page_times = 0;
+#endif
 	INIT_HLIST_BL_NODE(&dentry->d_hash);
 	INIT_LIST_HEAD(&dentry->d_lru);
 	INIT_LIST_HEAD(&dentry->d_subdirs);

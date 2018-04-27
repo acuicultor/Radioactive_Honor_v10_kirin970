@@ -12,7 +12,10 @@
 #include <linux/debug_locks.h>
 #include <linux/delay.h>
 #include <linux/export.h>
-
+#include <linux/version.h>
+#ifdef CONFIG_HISI_TIME
+#include <asm/cacheflush.h>
+#endif
 void __raw_spin_lock_init(raw_spinlock_t *lock, const char *name,
 			  struct lock_class_key *key)
 {
@@ -26,7 +29,7 @@ void __raw_spin_lock_init(raw_spinlock_t *lock, const char *name,
 	lock->raw_lock = (arch_spinlock_t)__ARCH_SPIN_LOCK_UNLOCKED;
 	lock->magic = SPINLOCK_MAGIC;
 	lock->owner = SPINLOCK_OWNER_INIT;
-	lock->owner_cpu = -1;
+	lock->owner_cpu = -1;/*lint !e570*/
 }
 
 EXPORT_SYMBOL(__raw_spin_lock_init);
@@ -44,7 +47,7 @@ void __rwlock_init(rwlock_t *lock, const char *name,
 	lock->raw_lock = (arch_rwlock_t) __ARCH_RW_LOCK_UNLOCKED;
 	lock->magic = RWLOCK_MAGIC;
 	lock->owner = SPINLOCK_OWNER_INIT;
-	lock->owner_cpu = -1;
+	lock->owner_cpu = -1;/*lint !e570*/
 }
 
 EXPORT_SYMBOL(__rwlock_init);
@@ -100,8 +103,15 @@ static inline void debug_spin_unlock(raw_spinlock_t *lock)
 	SPIN_BUG_ON(lock->owner_cpu != raw_smp_processor_id(),
 							lock, "wrong CPU");
 	lock->owner = SPINLOCK_OWNER_INIT;
-	lock->owner_cpu = -1;
+	lock->owner_cpu = -1;/*lint !e570*/
 }
+
+#ifdef CONFIG_HISI_TIME
+int g_logbuf_lock_flag = 0x55;
+extern raw_spinlock_t *g_logbuf_lock_ex;
+extern raw_spinlock_t *g_sem_lock_ex;
+raw_spinlock_t g_logbuf_lock_panic;
+#endif
 
 static void __spin_lock_debug(raw_spinlock_t *lock)
 {
@@ -113,6 +123,17 @@ static void __spin_lock_debug(raw_spinlock_t *lock)
 			return;
 		__delay(1);
 	}
+#ifdef CONFIG_HISI_TIME
+	if (g_logbuf_lock_ex == lock || g_sem_lock_ex == lock) {
+		g_logbuf_lock_flag = 0xAA;
+		memcpy(&g_logbuf_lock_panic, lock, sizeof(raw_spinlock_t));
+#if(LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0))
+		flush_cache_all();
+#endif
+		local_irq_disable();
+		while(1);
+	}
+#endif
 	/* lockup suspected: */
 	spin_dump(lock, "lockup suspected");
 #ifdef CONFIG_SMP
@@ -244,7 +265,7 @@ static inline void debug_write_unlock(rwlock_t *lock)
 	RWLOCK_BUG_ON(lock->owner_cpu != raw_smp_processor_id(),
 							lock, "wrong CPU");
 	lock->owner = SPINLOCK_OWNER_INIT;
-	lock->owner_cpu = -1;
+	lock->owner_cpu = -1;/*lint !e570*/
 }
 
 #if 0		/* This can cause lockups */

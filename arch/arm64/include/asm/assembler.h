@@ -396,18 +396,11 @@ alternative_endif
  */
 	.macro	get_thread_info, rd
 	mrs	\rd, sp_el0
-	.endm
-
-/*
- * Errata workaround post TTBR0_EL1 update.
- */
-	.macro	post_ttbr0_update_workaround
-#ifdef CONFIG_CAVIUM_ERRATUM_27456
-alternative_if ARM64_WORKAROUND_CAVIUM_27456
-	ic	iallu
-	dsb	nsh
-	isb
-alternative_else_nop_endif
+#ifdef CONFIG_HUAWEI_KERNEL_STACK_RANDOMIZE_STRONG
+        stp x23, x24, [sp, #-16]!
+        ldr_l   x23, kti_offset, x24
+        add \rd, \rd, x23
+        ldp x23, x24, [sp], #16
 #endif
 	.endm
 

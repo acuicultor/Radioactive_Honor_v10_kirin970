@@ -33,6 +33,7 @@
 #include <linux/syscalls.h>
 
 #include <asm/atomic.h>
+#include <asm/barrier.h>
 #include <asm/bug.h>
 #include <asm/debug-monitors.h>
 #include <asm/esr.h>
@@ -42,6 +43,10 @@
 #include <asm/stacktrace.h>
 #include <asm/exception.h>
 #include <asm/system_misc.h>
+
+#ifdef CONFIG_HISI_BB
+#include <linux/hisi/rdr_hisi_platform.h>
+#endif
 
 static const char *handler[]= {
 	"Synchronous Abort",
@@ -155,9 +160,6 @@ static void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk)
 	if (!tsk)
 		tsk = current;
 
-	if (!try_get_task_stack(tsk))
-		return;
-
 	/*
 	 * Switching between stacks is valid when tracing current and in
 	 * non-preemptible context.
@@ -166,11 +168,6 @@ static void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk)
 		irq_stack_ptr = IRQ_STACK_PTR(smp_processor_id());
 	else
 		irq_stack_ptr = 0;
-
-	pr_debug("%s(regs = %p tsk = %p)\n", __func__, regs, tsk);
-
-	if (!tsk)
-		tsk = current;
 
 	if (tsk == current) {
 		frame.fp = (unsigned long)__builtin_frame_address(0);
@@ -228,8 +225,6 @@ static void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk)
 				 stack + sizeof(struct pt_regs), false);
 		}
 	}
-
-	put_task_stack(tsk);
 }
 
 void show_stack(struct task_struct *tsk, unsigned long *sp)
@@ -285,11 +280,18 @@ void die(const char *str, struct pt_regs *regs, int err)
 {
 	int ret;
 
+#ifdef CONFIG_HUAWEI_PRINTK_CTRL
+	printk_level_setup(LOGLEVEL_DEBUG);
+#endif
+
 	oops_enter();
 
 	raw_spin_lock_irq(&die_lock);
 	console_verbose();
 	bust_spinlocks(1);
+#ifdef CONFIG_HISI_BB
+	set_exception_info(instruction_pointer(regs));
+#endif
 	ret = __die(str, err, regs);
 
 	if (regs && kexec_should_crash(current))
@@ -306,6 +308,9 @@ void die(const char *str, struct pt_regs *regs, int err)
 		panic("Fatal exception");
 	if (ret != NOTIFY_STOP)
 		do_exit(SIGSEGV);
+#ifdef CONFIG_HUAWEI_PRINTK_CTRL
+	printk_level_setup(sysctl_printk_level);
+#endif
 }
 
 void arm64_notify_die(const char *str, struct pt_regs *regs,
@@ -396,9 +401,15 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 		return;
 
 	if (unhandled_signal(current, SIGILL) && show_unhandled_signals_ratelimited()) {
+#ifdef CONFIG_HUAWEI_PRINTK_CTRL
+		printk_level_setup(LOGLEVEL_DEBUG);
+#endif
 		pr_info("%s[%d]: undefined instruction: pc=%p\n",
 			current->comm, task_pid_nr(current), pc);
 		dump_instr(KERN_INFO, regs);
+#ifdef CONFIG_HUAWEI_PRINTK_CTRL
+		printk_level_setup(sysctl_printk_level);
+#endif
 	}
 
 	info.si_signo = SIGILL;
@@ -407,6 +418,38 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 	info.si_addr  = pc;
 
 	arm64_notify_die("Oops - undefined instruction", regs, &info, 0);
+}
+
+static void cntvct_read_handler(unsigned int esr, struct pt_regs *regs)
+{
+	int rt = (esr & ESR_ELx_SYS64_ISS_RT_MASK) >> ESR_ELx_SYS64_ISS_RT_SHIFT;
+
+	isb();
+	if (rt != 31)
+		regs->regs[rt] = arch_counter_get_cntvct();
+	regs->pc += 4;
+}
+
+static void cntfrq_read_handler(unsigned int esr, struct pt_regs *regs)
+{
+	int rt = (esr & ESR_ELx_SYS64_ISS_RT_MASK) >> ESR_ELx_SYS64_ISS_RT_SHIFT;
+
+	if (rt != 31)
+		regs->regs[rt] = read_sysreg(cntfrq_el0);
+	regs->pc += 4;
+}
+
+asmlinkage void __exception do_sysinstr(unsigned int esr, struct pt_regs *regs)
+{
+	if ((esr & ESR_ELx_SYS64_ISS_SYS_OP_MASK) == ESR_ELx_SYS64_ISS_SYS_CNTVCT) {
+		cntvct_read_handler(esr, regs);
+		return;
+	} else if ((esr & ESR_ELx_SYS64_ISS_SYS_OP_MASK) == ESR_ELx_SYS64_ISS_SYS_CNTFRQ) {
+		cntfrq_read_handler(esr, regs);
+		return;
+	}
+
+	do_undefinstr(regs);
 }
 
 long compat_arm_syscall(struct pt_regs *regs);

@@ -55,9 +55,10 @@ static int cistpl_vers_1(struct mmc_card *card, struct sdio_func *func,
 
 	for (i = 0; i < nr_strings; i++) {
 		buffer[i] = string;
-		strcpy(string, buf);
+		/*cppcheck-suppress * */
+		strcpy(string, buf);/*lint !e64 !e421*/
 		string += strlen(string) + 1;
-		buf += strlen(buf) + 1;
+		buf += strlen(buf) + 1;/*lint !e64*/
 	}
 
 	if (func) {
@@ -281,7 +282,7 @@ static int sdio_read_cis(struct mmc_card *card, struct sdio_func *func)
 		if (tpl_link == 0xff)
 			break;
 
-		this = kmalloc(sizeof(*this) + tpl_link, GFP_KERNEL);
+		this = kzalloc(sizeof(*this) + tpl_link, GFP_KERNEL);
 		if (!this)
 			return -ENOMEM;
 

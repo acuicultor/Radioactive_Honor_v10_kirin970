@@ -237,8 +237,6 @@ struct dummy_hcd {
 
 	struct usb_device		*udev;
 	struct list_head		urbp_list;
-	struct urbp			*next_frame_urbp;
-
 	u32				stream_en_ep;
 	u8				num_stream[30 / 2];
 
@@ -255,13 +253,11 @@ struct dummy {
 	 */
 	struct dummy_ep			ep[DUMMY_ENDPOINTS];
 	int				address;
-	int				callback_usage;
 	struct usb_gadget		gadget;
 	struct usb_gadget_driver	*driver;
 	struct dummy_request		fifo_req;
 	u8				fifo_buf[FIFO_SIZE];
 	u16				devstatus;
-	unsigned			ints_enabled:1;
 	unsigned			udc_suspended:1;
 	unsigned			pullup:1;
 
@@ -334,7 +330,7 @@ static void nuke(struct dummy *dum, struct dummy_ep *ep)
 /* caller must hold lock */
 static void stop_activity(struct dummy *dum)
 {
-	int i;
+	struct dummy_ep	*ep;
 
 	/* prevent any more requests */
 	dum->address = 0;
@@ -342,8 +338,8 @@ static void stop_activity(struct dummy *dum)
 	/* The timer is left running so that outstanding URBs can fail */
 
 	/* nuke any pending requests first, so driver i/o is quiesced */
-	for (i = 0; i < DUMMY_ENDPOINTS; ++i)
-		nuke(dum, &dum->ep[i]);
+	list_for_each_entry(ep, &dum->gadget.ep_list, ep.ep_list)
+		nuke(dum, ep);
 
 	/* driver now does any non-usb quiescing necessary */
 }
@@ -447,27 +443,18 @@ static void set_link_state(struct dummy_hcd *dum_hcd)
 				(~dum_hcd->old_status) & dum_hcd->port_status;
 
 		/* Report reset and disconnect events to the driver */
-		if (dum->ints_enabled && (disconnect || reset)) {
+		if (dum->driver && (disconnect || reset)) {
 			stop_activity(dum);
-			++dum->callback_usage;
-			spin_unlock(&dum->lock);
 			if (reset)
 				usb_gadget_udc_reset(&dum->gadget, dum->driver);
 			else
 				dum->driver->disconnect(&dum->gadget);
-			spin_lock(&dum->lock);
-			--dum->callback_usage;
 		}
-	} else if (dum_hcd->active != dum_hcd->old_active &&
-			dum->ints_enabled) {
-		++dum->callback_usage;
-		spin_unlock(&dum->lock);
+	} else if (dum_hcd->active != dum_hcd->old_active) {
 		if (dum_hcd->old_active && dum->driver->suspend)
 			dum->driver->suspend(&dum->gadget);
 		else if (!dum_hcd->old_active &&  dum->driver->resume)
 			dum->driver->resume(&dum->gadget);
-		spin_lock(&dum->lock);
-		--dum->callback_usage;
 	}
 
 	dum_hcd->old_status = dum_hcd->port_status;
@@ -983,11 +970,8 @@ static int dummy_udc_start(struct usb_gadget *g,
 	 * can't enumerate without help from the driver we're binding.
 	 */
 
-	spin_lock_irq(&dum->lock);
 	dum->devstatus = 0;
 	dum->driver = driver;
-	dum->ints_enabled = 1;
-	spin_unlock_irq(&dum->lock);
 
 	return 0;
 }
@@ -998,16 +982,6 @@ static int dummy_udc_stop(struct usb_gadget *g)
 	struct dummy		*dum = dum_hcd->dum;
 
 	spin_lock_irq(&dum->lock);
-	dum->ints_enabled = 0;
-	stop_activity(dum);
-
-	/* emulate synchronize_irq(): wait for callbacks to finish */
-	while (dum->callback_usage > 0) {
-		spin_unlock_irq(&dum->lock);
-		usleep_range(1000, 2000);
-		spin_lock_irq(&dum->lock);
-	}
-
 	dum->driver = NULL;
 	spin_unlock_irq(&dum->lock);
 
@@ -1057,16 +1031,9 @@ static int dummy_udc_probe(struct platform_device *pdev)
 	int		rc;
 
 	dum = *((void **)dev_get_platdata(&pdev->dev));
-	/* Clear usb_gadget region for new registration to udc-core */
-	memzero_explicit(&dum->gadget, sizeof(struct usb_gadget));
 	dum->gadget.name = gadget_name;
 	dum->gadget.ops = &dummy_ops;
-	if (mod_data.is_super_speed)
-		dum->gadget.max_speed = USB_SPEED_SUPER;
-	else if (mod_data.is_high_speed)
-		dum->gadget.max_speed = USB_SPEED_HIGH;
-	else
-		dum->gadget.max_speed = USB_SPEED_FULL;
+	dum->gadget.max_speed = USB_SPEED_SUPER;
 
 	dum->gadget.dev.parent = &pdev->dev;
 	init_dummy_udc_hw(dum);
@@ -1275,8 +1242,6 @@ static int dummy_urb_enqueue(
 
 	list_add_tail(&urbp->urbp_list, &dum_hcd->urbp_list);
 	urb->hcpriv = urbp;
-	if (!dum_hcd->next_frame_urbp)
-		dum_hcd->next_frame_urbp = urbp;
 	if (usb_pipetype(urb->pipe) == PIPE_CONTROL)
 		urb->error_count = 1;		/* mark as a new urb */
 
@@ -1553,8 +1518,6 @@ static struct dummy_ep *find_endpoint(struct dummy *dum, u8 address)
 	if (!is_active((dum->gadget.speed == USB_SPEED_SUPER ?
 			dum->ss_hcd : dum->hs_hcd)))
 		return NULL;
-	if (!dum->ints_enabled)
-		return NULL;
 	if ((address & ~USB_DIR_IN) == 0)
 		return &dum->ep[0];
 	for (i = 1; i < DUMMY_ENDPOINTS; i++) {
@@ -1796,7 +1759,6 @@ static void dummy_timer(unsigned long _dum_hcd)
 		spin_unlock_irqrestore(&dum->lock, flags);
 		return;
 	}
-	dum_hcd->next_frame_urbp = NULL;
 
 	for (i = 0; i < DUMMY_ENDPOINTS; i++) {
 		if (!ep_info[i].name)
@@ -1812,10 +1774,6 @@ restart:
 		struct dummy_ep		*ep = NULL;
 		int			type;
 		int			status = -EINPROGRESS;
-
-		/* stop when we reach URBs queued after the timer interrupt */
-		if (urbp == dum_hcd->next_frame_urbp)
-			break;
 
 		urb = urbp->urb;
 		if (urb->unlinked)
@@ -1896,12 +1854,10 @@ restart:
 			 * until setup() returns; no reentrancy issues etc.
 			 */
 			if (value > 0) {
-				++dum->callback_usage;
 				spin_unlock(&dum->lock);
 				value = dum->driver->setup(&dum->gadget,
 						&setup);
 				spin_lock(&dum->lock);
-				--dum->callback_usage;
 
 				if (value >= 0) {
 					/* no delays (max 64KB data stage) */
@@ -2609,6 +2565,8 @@ static struct hc_driver dummy_hcd = {
 	.product_desc =		"Dummy host controller",
 	.hcd_priv_size =	sizeof(struct dummy_hcd),
 
+	.flags =		HCD_USB3 | HCD_SHARED,
+
 	.reset =		dummy_setup,
 	.start =		dummy_start,
 	.stop =			dummy_stop,
@@ -2637,12 +2595,8 @@ static int dummy_hcd_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "%s, driver " DRIVER_VERSION "\n", driver_desc);
 	dum = *((void **)dev_get_platdata(&pdev->dev));
 
-	if (mod_data.is_super_speed)
-		dummy_hcd.flags = HCD_USB3 | HCD_SHARED;
-	else if (mod_data.is_high_speed)
+	if (!mod_data.is_super_speed)
 		dummy_hcd.flags = HCD_USB2;
-	else
-		dummy_hcd.flags = HCD_USB11;
 	hs_hcd = usb_create_hcd(&dummy_hcd, &pdev->dev, dev_name(&pdev->dev));
 	if (!hs_hcd)
 		return -ENOMEM;

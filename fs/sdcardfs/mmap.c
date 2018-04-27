@@ -19,6 +19,7 @@
  */
 
 #include "sdcardfs.h"
+#include <linux/version.h>
 
 static int sdcardfs_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
@@ -66,9 +67,23 @@ out:
 	return err;
 }
 
-static ssize_t sdcardfs_direct_IO(struct kiocb *iocb,
-		struct iov_iter *iter, loff_t pos)
-{
+static ssize_t sdcardfs_direct_IO(
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 1, 0))
+	int rw,
+#endif
+	struct kiocb *iocb
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0))
+	, struct iov_iter *iter
+#else
+	, const struct iovec *iov
+#endif
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0))
+	, loff_t offset
+#endif
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0))
+	, unsigned long nr_segs
+#endif
+) {
 	/*
 	 * This function should never be called directly.  We need it
 	 * to exist, to get past a check in open_check_o_direct(),

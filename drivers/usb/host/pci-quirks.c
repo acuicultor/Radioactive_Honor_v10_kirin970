@@ -133,6 +133,11 @@ static int amd_chipset_sb_type_init(struct amd_chipset_info *pinfo)
 			pinfo->sb_type.gen = AMD_CHIPSET_SB700;
 		else if (rev >= 0x40 && rev <= 0x4f)
 			pinfo->sb_type.gen = AMD_CHIPSET_SB800;
+	}
+	pinfo->smbus_dev = pci_get_device(PCI_VENDOR_ID_AMD,
+					  0x145c, NULL);
+	if (pinfo->smbus_dev) {
+		pinfo->sb_type.gen = AMD_CHIPSET_TAISHAN;
 	} else {
 		pinfo->smbus_dev = pci_get_device(PCI_VENDOR_ID_AMD,
 				PCI_DEVICE_ID_AMD_HUDSON2_SMBUS, NULL);

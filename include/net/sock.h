@@ -69,6 +69,10 @@
 #include <net/tcp_states.h>
 #include <linux/net_tstamp.h>
 
+#ifdef CONFIG_HW_NETWORK_MEASUREMENT
+#include <huawei_platform/emcom/smartcare/network_measurement/nm_types.h>
+#endif /* CONFIG_HW_NETWORK_MEASUREMENT */
+
 struct cgroup;
 struct cgroup_subsys;
 #ifdef CONFIG_NET
@@ -241,8 +245,28 @@ struct sock_common {
 		u32		skc_tw_snd_nxt; /* struct tcp_timewait_sock */
 	};
 	/* public: */
+    #ifdef CONFIG_HW_DPIMARK_MODULE
+	unsigned int    skc_hwdpi_mark;
+    #endif
 };
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+/* cdn: Cross-layer Dropped Notification */
+#define MAX_CDN_QSIZE 256
+
+struct cdn_queue {
+	struct cdn_queue	*next;
+	u32			seq;
+	u32			padding;
+};
+
+struct cdn_entry {
+	struct cdn_queue	pool[MAX_CDN_QSIZE];
+	struct cdn_queue	*hint;
+	struct cdn_queue	*head;
+	int			index;
+};
+#endif
 struct cg_proto;
 /**
   *	struct sock - network layer representation of sockets
@@ -265,6 +289,7 @@ struct cg_proto;
   *	@sk_ll_usec: usecs to busypoll when there is no data
   *	@sk_allocation: allocation mode
   *	@sk_pacing_rate: Pacing rate (if supported by transport/packet scheduler)
+  *	@sk_pacing_status: Pacing status (requested, handled by sch_fq)
   *	@sk_max_pacing_rate: Maximum pacing rate (%SO_MAX_PACING_RATE)
   *	@sk_sndbuf: size of send buffer in bytes
   *	@sk_no_check_tx: %SO_NO_CHECK setting, set checksum in TX packets
@@ -354,6 +379,7 @@ struct sock {
 #define sk_incoming_cpu		__sk_common.skc_incoming_cpu
 #define sk_flags		__sk_common.skc_flags
 #define sk_rxhash		__sk_common.skc_rxhash
+#define sk_hwdpi_mark   __sk_common.skc_hwdpi_mark
 
 	socket_lock_t		sk_lock;
 	struct sk_buff_head	sk_receive_queue;
@@ -387,12 +413,31 @@ struct sock {
 		struct socket_wq __rcu	*sk_wq;
 		struct socket_wq	*sk_wq_raw;
 	};
+
+#ifdef CONFIG_HUAWEI_BASTET
+	struct bastet_sock *bastet;
+	struct bastet_reconn *reconn;
+	int fg_Spec;
+	int fg_Step;
+	bool prio_channel;
+#endif
+#if defined(CONFIG_HUAWEI_BASTET) || defined(CONFIG_HUAWEI_XENGINE)
+	uint8_t acc_state;
+#endif
+
+#ifdef CONFIG_HW_WIFIPRO
+	int wifipro_is_google_sock;
+	char wifipro_dev_name[IFNAMSIZ];
+#endif
+
 #ifdef CONFIG_XFRM
 	struct xfrm_policy __rcu *sk_policy[2];
 #endif
 	struct dst_entry	*sk_rx_dst;
 	struct dst_entry __rcu	*sk_dst_cache;
-	/* Note: 32bit hole on 64bit arches */
+#ifdef CONFIG_TCP_CONG_BBR
+	u32			sk_pacing_status; /* see enum sk_pacing */
+#endif
 	atomic_t		sk_wmem_alloc;
 	atomic_t		sk_omem_alloc;
 	int			sk_sndbuf;
@@ -458,7 +503,40 @@ struct sock {
 	int			(*sk_backlog_rcv)(struct sock *sk,
 						  struct sk_buff *skb);
 	void                    (*sk_destruct)(struct sock *sk);
+#ifdef CONFIG_HW_CROSSLAYER_OPT_DBG_MODULE
+	u32			start_seq;
+	u32			snd_id;
+	u32			nowrtt;
+	u32			fast_rexmit_cnts;
+	u32			timeout_rexmit_cnts;
+	u32			modem_drop_rexmit_cnts;
+	u32			undo_modem_drop_cnts;
+#endif
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	struct cdn_entry	*sk_dropped;
+	u32			undo_modem_drop_marker;
+	u32			cdn_hash_marker;
+#endif
+#ifdef CONFIG_HW_NETWORK_MEASUREMENT
+	unsigned int		sk_nm_uid;
+	struct tcp_statistics	*sk_tcp_statis;
+	union {
+		struct nm_http_entry	*sk_nm_http;
+		struct nm_dnsp_entry	*sk_nm_dnsp;
+	};
+#endif /* CONFIG_HW_NETWORK_MEASUREMENT */
+#ifdef CONFIG_HUAWEI_XENGINE
+	int			hicom_flag;
+#endif
 };
+
+#ifdef CONFIG_TCP_CONG_BBR
+enum sk_pacing {
+	SK_PACING_NONE          = 0,
+	SK_PACING_NEEDED        = 1,
+	SK_PACING_FQ            = 2,
+};
+#endif
 
 #define __sk_user_data(sk) ((*((void __rcu **)&(sk)->sk_user_data)))
 
@@ -740,6 +818,10 @@ enum sock_flags {
 		     */
 	SOCK_FILTER_LOCKED, /* Filter cannot be changed anymore */
 	SOCK_SELECT_ERR_QUEUE, /* Wake select on error queue */
+#ifdef CONFIG_MPTCP
+	SOCK_MPTCP, /* MPTCP set on this socket */
+	SOCK_MPTCP_ONCE_SET, /* MPTCP set on this socket once */
+#endif
 };
 
 #define SK_FLAGS_TIMESTAMP ((1UL << SOCK_TIMESTAMP) | (1UL << SOCK_TIMESTAMPING_RX_SOFTWARE))
@@ -934,6 +1016,18 @@ void sk_clear_memalloc(struct sock *sk);
 
 int sk_wait_data(struct sock *sk, long *timeo, const struct sk_buff *skb);
 
+#ifdef CONFIG_MPTCP
+/* START - needed for MPTCP */
+struct sock *sk_prot_alloc(struct proto *prot, gfp_t priority, int family);
+void sock_lock_init(struct sock *sk);
+
+extern struct lock_class_key af_callback_keys[AF_MAX];
+extern char *const af_family_clock_key_strings[AF_MAX+1];
+
+#define SK_FLAGS_TIMESTAMP ((1UL << SOCK_TIMESTAMP) | (1UL << SOCK_TIMESTAMPING_RX_SOFTWARE))
+/* END - needed for MPTCP */
+#endif
+
 struct request_sock_ops;
 struct timewait_sock_ops;
 struct inet_hashinfo;
@@ -1009,7 +1103,9 @@ struct proto {
 	void			(*rehash)(struct sock *sk);
 	int			(*get_port)(struct sock *sk, unsigned short snum);
 	void			(*clear_sk)(struct sock *sk, int size);
-
+#ifdef CONFIG_MPTCP
+	void			(*copy_sk)(struct sock *nsk, const struct sock *osk);
+#endif
 	/* Keeping track of sockets in use */
 #ifdef CONFIG_PROC_FS
 	unsigned int		inuse_idx;

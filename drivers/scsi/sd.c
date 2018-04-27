@@ -137,15 +137,15 @@ static const char *sd_cache_types[] = {
 
 static void sd_set_flush_flag(struct scsi_disk *sdkp)
 {
-	unsigned flush = 0;
+	bool wc = false, fua = false;
 
 	if (sdkp->WCE) {
-		flush |= REQ_FLUSH;
+		wc = true;
 		if (sdkp->DPOFUA)
-			flush |= REQ_FUA;
+			fua = true;
 	}
 
-	blk_queue_flush(sdkp->disk->queue, flush);
+	blk_queue_write_cache(sdkp->disk->queue, wc, fua);
 }
 
 static ssize_t
@@ -233,11 +233,15 @@ manage_start_stop_store(struct device *dev, struct device_attribute *attr,
 {
 	struct scsi_disk *sdkp = to_scsi_disk(dev);
 	struct scsi_device *sdp = sdkp->device;
+	bool v;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EACCES;
 
-	sdp->manage_start_stop = simple_strtoul(buf, NULL, 10);
+	if (kstrtobool(buf, &v))
+		return -EINVAL;
+
+	sdp->manage_start_stop = v;
 
 	return count;
 }
@@ -255,6 +259,7 @@ static ssize_t
 allow_restart_store(struct device *dev, struct device_attribute *attr,
 		    const char *buf, size_t count)
 {
+	bool v;
 	struct scsi_disk *sdkp = to_scsi_disk(dev);
 	struct scsi_device *sdp = sdkp->device;
 
@@ -264,7 +269,10 @@ allow_restart_store(struct device *dev, struct device_attribute *attr,
 	if (sdp->type != TYPE_DISK)
 		return -EINVAL;
 
-	sdp->allow_restart = simple_strtoul(buf, NULL, 10);
+	if (kstrtobool(buf, &v))
+		return -EINVAL;
+
+	sdp->allow_restart = v;
 
 	return count;
 }
@@ -895,6 +903,30 @@ static int sd_setup_flush_cmnd(struct scsi_cmnd *cmd)
 	return BLKPREP_OK;
 }
 
+#ifdef CONFIG_HISI_SCSI_VENDOR_CMD_HOTCOLD
+int is_hotcold_device(void)
+{
+	return 0;
+}
+
+void scsi_hotcold_cmnd(struct scsi_cmnd *SCpnt)
+{
+	struct request *rq = SCpnt->request;
+
+#ifdef CONFIG_HISI_SCSI_VENDOR_CMD_DEBUG
+	pr_devel("<%s, %d> rq->cmd_flags=0x%llX, HOTCOLD_ID=0x%llX\n",
+			__func__, __LINE__,
+			rq->cmd_flags, (long long unsigned int) HOTCOLD_ID(rq->cmd_flags));
+
+#endif
+	if (is_hotcold_device()) {
+		if (rq_data_dir(rq) == WRITE) {
+			SCpnt->cmnd[6] |= HOTCOLD_ID(rq->cmd_flags) << SCSI_HOTCOLD_ID_OFFSET;
+		}
+	}
+}
+#endif
+
 static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 {
 	struct request *rq = SCpnt->request;
@@ -1094,6 +1126,9 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		SCpnt->cmnd[6] = SCpnt->cmnd[9] = 0;
 		SCpnt->cmnd[7] = (unsigned char) (this_count >> 8) & 0xff;
 		SCpnt->cmnd[8] = (unsigned char) this_count & 0xff;
+#ifdef CONFIG_HISI_SCSI_VENDOR_CMD_HOTCOLD
+		scsi_hotcold_cmnd(SCpnt);
+#endif
 	} else {
 		if (unlikely(rq->cmd_flags & REQ_FUA)) {
 			/*
@@ -2051,22 +2086,6 @@ static void read_capacity_error(struct scsi_disk *sdkp, struct scsi_device *sdp,
 
 #define READ_CAPACITY_RETRIES_ON_RESET	10
 
-/*
- * Ensure that we don't overflow sector_t when CONFIG_LBDAF is not set
- * and the reported logical block size is bigger than 512 bytes. Note
- * that last_sector is a u64 and therefore logical_to_sectors() is not
- * applicable.
- */
-static bool sd_addressable_capacity(u64 lba, unsigned int sector_size)
-{
-	u64 last_sector = (lba + 1ULL) << (ilog2(sector_size) - 9);
-
-	if (sizeof(sector_t) == 4 && last_sector > U32_MAX)
-		return false;
-
-	return true;
-}
-
 static int read_capacity_16(struct scsi_disk *sdkp, struct scsi_device *sdp,
 						unsigned char *buffer)
 {
@@ -2132,7 +2151,7 @@ static int read_capacity_16(struct scsi_disk *sdkp, struct scsi_device *sdp,
 		return -ENODEV;
 	}
 
-	if (!sd_addressable_capacity(lba, sector_size)) {
+	if ((sizeof(sdkp->capacity) == 4) && (lba >= 0xffffffffULL)) {
 		sd_printk(KERN_ERR, sdkp, "Too big for this kernel. Use a "
 			"kernel compiled with support for large block "
 			"devices.\n");
@@ -2218,7 +2237,7 @@ static int read_capacity_10(struct scsi_disk *sdkp, struct scsi_device *sdp,
 		return sector_size;
 	}
 
-	if (!sd_addressable_capacity(lba, sector_size)) {
+	if ((sizeof(sdkp->capacity) == 4) && (lba == 0xffffffff)) {
 		sd_printk(KERN_ERR, sdkp, "Too big for this kernel. Use a "
 			"kernel compiled with support for large block "
 			"devices.\n");
@@ -2445,6 +2464,7 @@ sd_read_cache_type(struct scsi_disk *sdkp, unsigned char *buffer)
 {
 	int len = 0, res;
 	struct scsi_device *sdp = sdkp->device;
+	struct Scsi_Host *host = sdp->host;
 
 	int dbd;
 	int modepage;
@@ -2476,7 +2496,10 @@ sd_read_cache_type(struct scsi_disk *sdkp, unsigned char *buffer)
 		dbd = 8;
 	} else {
 		modepage = 8;
-		dbd = 0;
+		if (host->set_dbd_for_caching)
+			dbd = 8;
+		else
+			dbd = 0;
 	}
 
 	/* cautiously ask */
@@ -2871,9 +2894,10 @@ static int sd_revalidate_disk(struct gendisk *disk)
 			sd_read_block_limits(sdkp);
 			sd_read_block_characteristics(sdkp);
 		}
-
-		sd_read_write_protect_flag(sdkp, buffer);
-		sd_read_cache_type(sdkp, buffer);
+		if (likely(!sdp->host->is_emulator)) {
+			sd_read_write_protect_flag(sdkp, buffer);
+			sd_read_cache_type(sdkp, buffer);
+		}
 		sd_read_app_tag_own(sdkp, buffer);
 		sd_read_write_same(sdkp, buffer);
 	}
@@ -2899,12 +2923,11 @@ static int sd_revalidate_disk(struct gendisk *disk)
 	if (sdkp->opt_xfer_blocks &&
 	    sdkp->opt_xfer_blocks <= dev_max &&
 	    sdkp->opt_xfer_blocks <= SD_DEF_XFER_BLOCKS &&
-	    logical_to_bytes(sdp, sdkp->opt_xfer_blocks) >= PAGE_CACHE_SIZE) {
-		q->limits.io_opt = logical_to_bytes(sdp, sdkp->opt_xfer_blocks);
-		rw_max = logical_to_sectors(sdp, sdkp->opt_xfer_blocks);
-	} else
-		rw_max = min_not_zero(logical_to_sectors(sdp, dev_max),
-				      (sector_t)BLK_DEF_MAX_SECTORS);
+	    sdkp->opt_xfer_blocks * sdp->sector_size >= PAGE_CACHE_SIZE)
+		rw_max = q->limits.io_opt =
+			sdkp->opt_xfer_blocks * sdp->sector_size;
+	else
+		rw_max = BLK_DEF_MAX_SECTORS;
 
 	/* Do not exceed controller limit */
 	rw_max = min(rw_max, queue_max_hw_sectors(q));
@@ -3265,7 +3288,7 @@ static int sd_start_stop_device(struct scsi_disk *sdkp, int start)
 static void sd_shutdown(struct device *dev)
 {
 	struct scsi_disk *sdkp = dev_get_drvdata(dev);
-
+	dev_info(dev, "%s ++\n", __func__);
 	if (!sdkp)
 		return;         /* this can happen */
 
@@ -3281,6 +3304,7 @@ static void sd_shutdown(struct device *dev)
 		sd_printk(KERN_NOTICE, sdkp, "Stopping disk\n");
 		sd_start_stop_device(sdkp, 0);
 	}
+	dev_info(dev, "%s --\n", __func__);
 }
 
 static int sd_suspend_common(struct device *dev, bool ignore_stop_errors)
@@ -3449,4 +3473,3 @@ static void sd_print_result(const struct scsi_disk *sdkp, const char *msg,
 			  "%s: Result: hostbyte=0x%02x driverbyte=0x%02x\n",
 			  msg, host_byte(result), driver_byte(result));
 }
-

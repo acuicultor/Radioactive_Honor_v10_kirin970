@@ -191,6 +191,7 @@ struct bpf_insn_aux_data {
 		enum bpf_reg_type ptr_type;	/* pointer type for load/store insns */
 		struct bpf_map *map_ptr;	/* pointer for call insn into lookup_elem */
 	};
+	bool seen; /* this insn was processed by the verifier */
 };
 
 #define MAX_USED_MAPS 64 /* max number of maps accessed by one eBPF program */
@@ -321,7 +322,8 @@ static const char *const bpf_jmp_string[16] = {
 	[BPF_EXIT >> 4] = "exit",
 };
 
-static void print_bpf_insn(struct bpf_insn *insn)
+static void print_bpf_insn(const struct verifier_env *env,
+			   const struct bpf_insn *insn)
 {
 	u8 class = BPF_CLASS(insn->code);
 
@@ -385,9 +387,19 @@ static void print_bpf_insn(struct bpf_insn *insn)
 				insn->code,
 				bpf_ldst_string[BPF_SIZE(insn->code) >> 3],
 				insn->src_reg, insn->imm);
-		} else if (BPF_MODE(insn->code) == BPF_IMM) {
-			verbose("(%02x) r%d = 0x%x\n",
-				insn->code, insn->dst_reg, insn->imm);
+		} else if (BPF_MODE(insn->code) == BPF_IMM &&
+			   BPF_SIZE(insn->code) == BPF_DW) {
+			/* At this point, we already made sure that the second
+			 * part of the ldimm64 insn is accessible.
+			 */
+			u64 imm = ((u64)(insn + 1)->imm << 32) | (u32)insn->imm;
+			bool map_ptr = insn->src_reg == BPF_PSEUDO_MAP_FD;
+
+			if (map_ptr && !env->allow_ptr_leaks)
+				imm = 0;
+
+			verbose("(%02x) r%d = 0x%llx\n", insn->code,
+				insn->dst_reg, (unsigned long long)imm);
 		} else {
 			verbose("BUG_ld_%02x\n", insn->code);
 			return;
@@ -671,6 +683,13 @@ static bool is_pointer_value(struct verifier_env *env, int regno)
 	}
 }
 
+static bool is_ctx_reg(struct verifier_env *env, int regno)
+{
+	const struct reg_state *reg = &env->cur_state.regs[regno];
+
+	return reg->type == PTR_TO_CTX;
+}
+
 /* check whether memory at (regno + off) is accessible for t = (read | write)
  * if t==write, value_regno is a register which value is stored into memory
  * if t==read, value_regno is a register which will receive the value from memory
@@ -761,6 +780,17 @@ static int check_xadd(struct verifier_env *env, struct bpf_insn *insn)
 	err = check_reg_arg(regs, insn->dst_reg, SRC_OP);
 	if (err)
 		return err;
+
+	if (is_pointer_value(env, insn->src_reg)) {
+		verbose("R%d leaks addr into mem\n", insn->src_reg);
+		return -EACCES;
+	}
+
+	if (is_ctx_reg(env, insn->dst_reg)) {
+		verbose("BPF_XADD stores into R%d context is not allowed\n",
+			insn->dst_reg);
+		return -EACCES;
+	}
 
 	/* check whether atomic_add can read the memory */
 	err = check_mem_access(env, insn->dst_reg, insn->off,
@@ -1043,7 +1073,8 @@ static int check_alu_op(struct verifier_env *env, struct bpf_insn *insn)
 			}
 		} else {
 			if (insn->src_reg != BPF_REG_0 || insn->off != 0 ||
-			    (insn->imm != 16 && insn->imm != 32 && insn->imm != 64)) {
+			    (insn->imm != 16 && insn->imm != 32 && insn->imm != 64) ||
+			    BPF_CLASS(insn->code) == BPF_ALU64) {
 				verbose("BPF_END uses reserved fields\n");
 				return -EINVAL;
 			}
@@ -1144,6 +1175,11 @@ static int check_alu_op(struct verifier_env *env, struct bpf_insn *insn)
 		if ((opcode == BPF_MOD || opcode == BPF_DIV) &&
 		    BPF_SRC(insn->code) == BPF_K && insn->imm == 0) {
 			verbose("div by zero\n");
+			return -EINVAL;
+		}
+
+		if (opcode == BPF_ARSH && BPF_CLASS(insn->code) != BPF_ALU64) {
+			verbose("BPF_ARSH not supported for 32 bit ALU\n");
 			return -EINVAL;
 		}
 
@@ -1773,9 +1809,10 @@ static int do_check(struct verifier_env *env)
 
 		if (log_level) {
 			verbose("%d: ", insn_idx);
-			print_bpf_insn(insn);
+			print_bpf_insn(env, insn);
 		}
 
+		env->insn_aux_data[insn_idx].seen = true;
 		if (class == BPF_ALU || class == BPF_ALU64) {
 			err = check_alu_op(env, insn);
 			if (err)
@@ -1885,6 +1922,12 @@ static int do_check(struct verifier_env *env)
 			if (err)
 				return err;
 
+			if (is_ctx_reg(env, insn->dst_reg)) {
+				verbose("BPF_ST stores into R%d context is not allowed\n",
+					insn->dst_reg);
+				return -EACCES;
+			}
+
 			/* check that memory (dst_reg + off) is writeable */
 			err = check_mem_access(env, insn->dst_reg, insn->off,
 					       BPF_SIZE(insn->code), BPF_WRITE,
@@ -1971,6 +2014,7 @@ process_bpf_exit:
 					return err;
 
 				insn_idx++;
+				env->insn_aux_data[insn_idx].seen = true;
 			} else {
 				verbose("invalid BPF_LD mode\n");
 				return -EINVAL;
@@ -2108,6 +2152,7 @@ static int adjust_insn_aux_data(struct verifier_env *env, u32 prog_len,
 				u32 off, u32 cnt)
 {
 	struct bpf_insn_aux_data *new_data, *old_data = env->insn_aux_data;
+	int i;
 
 	if (cnt == 1)
 		return 0;
@@ -2117,6 +2162,8 @@ static int adjust_insn_aux_data(struct verifier_env *env, u32 prog_len,
 	memcpy(new_data, old_data, sizeof(struct bpf_insn_aux_data) * off);
 	memcpy(new_data + off + cnt - 1, old_data + off,
 	       sizeof(struct bpf_insn_aux_data) * (prog_len - off - cnt + 1));
+	for (i = off; i < off + cnt - 1; i++)
+		new_data[i].seen = true;
 	env->insn_aux_data = new_data;
 	vfree(old_data);
 	return 0;
@@ -2133,6 +2180,25 @@ static struct bpf_prog *bpf_patch_insn_data(struct verifier_env *env, u32 off,
 	if (adjust_insn_aux_data(env, new_prog->len, off, len))
 		return NULL;
 	return new_prog;
+}
+
+/* The verifier does more data flow analysis than llvm and will not explore
+ * branches that are dead at run time. Malicious programs can have dead code
+ * too. Therefore replace all dead at-run-time code with nops.
+ */
+static void sanitize_dead_code(struct verifier_env *env)
+{
+	struct bpf_insn_aux_data *aux_data = env->insn_aux_data;
+	struct bpf_insn nop = BPF_MOV64_REG(BPF_REG_0, BPF_REG_0);
+	struct bpf_insn *insn = env->prog->insnsi;
+	const int insn_cnt = env->prog->len;
+	int i;
+
+	for (i = 0; i < insn_cnt; i++) {
+		if (aux_data[i].seen)
+			continue;
+		memcpy(insn + i, &nop, sizeof(nop));
+	}
 }
 
 /* convert load instructions that access fields of 'struct __sk_buff'
@@ -2201,6 +2267,24 @@ static int fixup_bpf_calls(struct verifier_env *env)
 	int i, cnt, delta = 0;
 
 	for (i = 0; i < insn_cnt; i++, insn++) {
+		if (insn->code == (BPF_ALU | BPF_MOD | BPF_X) ||
+		    insn->code == (BPF_ALU | BPF_DIV | BPF_X)) {
+			/* due to JIT bugs clear upper 32-bits of src register
+			 * before div/mod operation
+			 */
+			insn_buf[0] = BPF_MOV32_REG(insn->src_reg, insn->src_reg);
+			insn_buf[1] = *insn;
+			cnt = 2;
+			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
+			if (!new_prog)
+				return -ENOMEM;
+
+			delta    += cnt - 1;
+			env->prog = prog = new_prog;
+			insn      = new_prog->insnsi + i + delta;
+			continue;
+		}
+
 		if (insn->code != (BPF_JMP | BPF_CALL))
 			continue;
 
@@ -2352,6 +2436,9 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr)
 skip_full_check:
 	while (pop_stack(env, NULL) >= 0);
 	free_states(env);
+
+	if (ret == 0)
+		sanitize_dead_code(env);
 
 	if (ret == 0)
 		/* program is valid, convert *(u32*)(ctx + off) accesses */

@@ -9,7 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <asm/branch.h>
 #include <asm/cpu.h>
 #include <asm/cpu-features.h>
@@ -481,7 +481,7 @@ int __compute_return_epc_for_insn(struct pt_regs *regs,
 			/*
 			 * OK we are here either because we hit a NAL
 			 * instruction or because we are emulating an
-			 * old bltzal{,l} one. Lets figure out what the
+			 * old bltzal{,l} one. Let's figure out what the
 			 * case really is.
 			 */
 			if (!insn.i_format.rs) {
@@ -515,7 +515,7 @@ int __compute_return_epc_for_insn(struct pt_regs *regs,
 			/*
 			 * OK we are here either because we hit a BAL
 			 * instruction or because we are emulating an
-			 * old bgezal{,l} one. Lets figure out what the
+			 * old bgezal{,l} one. Let's figure out what the
 			 * case really is.
 			 */
 			if (!insn.i_format.rs) {
@@ -802,7 +802,7 @@ int __compute_return_epc_for_insn(struct pt_regs *regs,
 		epc += 4 + (insn.i_format.simmediate << 2);
 		regs->cp0_epc = epc;
 		break;
-	case beqzcjic_op:
+	case pop66_op:
 		if (!cpu_has_mips_r6) {
 			ret = -SIGILL;
 			break;
@@ -810,7 +810,7 @@ int __compute_return_epc_for_insn(struct pt_regs *regs,
 		/* Compact branch: BEQZC || JIC */
 		regs->cp0_epc += 8;
 		break;
-	case bnezcjialc_op:
+	case pop76_op:
 		if (!cpu_has_mips_r6) {
 			ret = -SIGILL;
 			break;
@@ -821,8 +821,8 @@ int __compute_return_epc_for_insn(struct pt_regs *regs,
 		regs->cp0_epc += 8;
 		break;
 #endif
-	case cbcond0_op:
-	case cbcond1_op:
+	case pop10_op:
+	case pop30_op:
 		/* Only valid for MIPS R6 */
 		if (!cpu_has_mips_r6) {
 			ret = -SIGILL;

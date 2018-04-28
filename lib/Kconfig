@@ -534,4 +534,8 @@ config ARCH_HAS_MMIO_FLUSH
 config WBT
 	bool "buffered writeback throttling"
 
+config STACKDEPOT
+	bool
+	select STACKTRACE
+
 endmenu

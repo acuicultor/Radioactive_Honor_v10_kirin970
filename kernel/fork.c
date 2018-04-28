@@ -76,11 +76,7 @@
 #include <linux/compiler.h>
 #include <linux/sysctl.h>
 #include <linux/hisi/hisi_hkip.h>
-
-#ifdef CONFIG_KCOV
 #include <linux/kcov.h>
-#endif
-
 #include <linux/blk-cgroup.h>
 
 #include <asm/pgtable.h>
@@ -401,9 +397,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 
 	account_kernel_stack(stack, 1);
 
-#ifdef CONFIG_KCOV
 	kcov_task_init(tsk);
-#endif
 
 	return tsk;
 

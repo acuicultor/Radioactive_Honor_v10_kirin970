@@ -1,6 +1,6 @@
 VERSION = 4
 PATCHLEVEL = 4
-SUBLEVEL = 106
+SUBLEVEL = 107
 EXTRAVERSION =
 NAME = Blurry Fish Butt
 
@@ -751,6 +751,7 @@ ifdef CONFIG_KCOV
     CFLAGS_KCOV =
   endif
 endif
+
 ifeq ($(cc-name),clang)
 ifneq ($(CROSS_COMPILE),)
 CLANG_TRIPLE    ?= $(CROSS_COMPILE)

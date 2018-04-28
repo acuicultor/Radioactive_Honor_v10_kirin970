@@ -54,9 +54,7 @@
 #include <linux/writeback.h>
 #include <linux/shm.h>
 #include <linux/boost_sigkill_free.h>
-#ifdef CONFIG_KCOV
 #include <linux/kcov.h>
-#endif
 
 #include "sched/tune.h"
 
@@ -663,6 +661,7 @@ void do_exit(long code)
 	TASKS_RCU(int tasks_rcu_i);
 
 	profile_task_exit(tsk);
+	kcov_task_exit(tsk);
 
 #ifdef CONFIG_KCOV
 	kcov_task_exit(tsk);

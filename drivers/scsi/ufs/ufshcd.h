@@ -833,7 +833,8 @@ struct ufs_hba {
 	u32 reg_uecpa;
 #endif
 	int			latency_hist_enabled;
-	struct io_latency_state io_lat_s;
+	struct io_latency_state io_lat_read;
+	struct io_latency_state io_lat_write;
 
 #ifdef CONFIG_DEVICE_HEALTH_INFO
 	u8 device_health_info[DESC_HEALTH_INFO_SIZE];

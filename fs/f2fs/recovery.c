@@ -149,7 +149,7 @@ static int recover_dentry(struct inode *inode, struct page *ipage,
 retry:
 	de = __f2fs_find_entry(dir, &fname, &page);
 	if (de && inode->i_ino == le32_to_cpu(de->ino))
-		goto out_unmap_put;
+		goto out_put;
 
 	if (de) {
 		einode = f2fs_iget_retry(inode->i_sb, le32_to_cpu(de->ino));
@@ -158,12 +158,12 @@ retry:
 			err = PTR_ERR(einode);
 			if (err == -ENOENT)
 				err = -EEXIST;
-			goto out_unmap_put;
+			goto out_put;
 		}
 		err = acquire_orphan_inode(F2FS_I_SB(inode));
 		if (err) {
 			iput(einode);
-			goto out_unmap_put;
+			goto out_put;
 		}
 		f2fs_delete_entry(de, page, dir, einode);
 		iput(einode);
@@ -178,8 +178,7 @@ retry:
 		goto retry;
 	goto out;
 
-out_unmap_put:
-	f2fs_dentry_kunmap(dir, page);
+out_put:
 	f2fs_put_page(page, 0);
 out:
 	if (file_enc_name(inode))
@@ -588,7 +587,6 @@ static int __exist_dentry_in_parent(struct f2fs_sb_info *sbi,
 	else if (entry->inode->i_ino == le32_to_cpu(de->ino))
 		ret = 1;
 
-	f2fs_dentry_kunmap(parent_entry->inode, res_page);
 	f2fs_put_page(res_page, 0);
 out_put:
 	f2fs_put_page(ipage, 1);

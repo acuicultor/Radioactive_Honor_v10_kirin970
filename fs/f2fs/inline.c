@@ -377,7 +377,7 @@ static int f2fs_move_inline_dirents(struct inode *dir, struct page *ipage,
 	f2fs_wait_on_page_writeback(page, DATA, true);
 	zero_user_segment(page, MAX_INLINE_DATA, PAGE_SIZE);
 
-	dentry_blk = kmap_atomic(page);
+	dentry_blk = page_address(page);
 
 	/* copy data from inline dentry block to new dentry block */
 	memcpy(dentry_blk->dentry_bitmap, inline_dentry->dentry_bitmap,
@@ -395,7 +395,6 @@ static int f2fs_move_inline_dirents(struct inode *dir, struct page *ipage,
 	memcpy(dentry_blk->filename, inline_dentry->filename,
 					NR_INLINE_DENTRY * F2FS_SLOT_LEN);
 
-	kunmap_atomic(dentry_blk);
 	if (!PageUptodate(page))
 		SetPageUptodate(page);
 	set_page_dirty(page);

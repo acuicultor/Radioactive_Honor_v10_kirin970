@@ -2,7 +2,7 @@
 
 # Radioactive Kernel Details
 KERNEL_NAME="~Radioactive"
-INCREMENTAL_VERSION="V1.0.6"
+INCREMENTAL_VERSION="V1.0.7"
 export LOCALVERSION="${KERNEL_NAME}-${INCREMENTAL_VERSION}"
 export KBUILD_BUILD_USER=acuicultor
 export KBUILD_BUILD_HOST=NuclearPowerPlant
